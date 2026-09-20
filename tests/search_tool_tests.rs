@@ -133,3 +133,50 @@ async fn test_search_zero_results_is_success() {
     let structured = result.structured_content.unwrap();
     assert_eq!(structured["results"].as_array().unwrap().len(), 0);
 }
+
+#[test]
+fn test_provider_options_schema_and_validation() {
+    // 1. JSON Schema inspection: provider_options must be an object
+    let schema = schemars::schema_for!(WebSearchParams);
+    let schema_json = serde_json::to_value(&schema).unwrap();
+    let provider_options_schema = &schema_json["properties"]["provider_options"];
+    assert!(
+        provider_options_schema["type"] == "object"
+            || provider_options_schema["type"] == json!(["object", "null"])
+            || provider_options_schema.get("anyOf").is_some()
+    );
+
+    // 2. Deserializing a valid object succeeds
+    let valid_json = json!({
+        "query": "rust",
+        "provider_options": {
+            "custom_flag": true,
+            "engine": "google"
+        }
+    });
+    let parsed: std::result::Result<WebSearchParams, _> = serde_json::from_value(valid_json);
+    assert!(parsed.is_ok());
+    let params = parsed.unwrap();
+    assert!(params.provider_options.is_some());
+    assert_eq!(
+        params.provider_options.unwrap().get("custom_flag").unwrap(),
+        &json!(true)
+    );
+
+    // 3. Deserializing a scalar string fails
+    let scalar_json = json!({
+        "query": "rust",
+        "provider_options": "not-an-object"
+    });
+    let parsed_scalar: std::result::Result<WebSearchParams, _> =
+        serde_json::from_value(scalar_json);
+    assert!(parsed_scalar.is_err());
+
+    // 4. Deserializing an array fails
+    let array_json = json!({
+        "query": "rust",
+        "provider_options": [1, 2, 3]
+    });
+    let parsed_array: std::result::Result<WebSearchParams, _> = serde_json::from_value(array_json);
+    assert!(parsed_array.is_err());
+}

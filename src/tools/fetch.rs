@@ -24,6 +24,8 @@ impl FetchFormat {
     }
 }
 
+pub const DEFAULT_MAX_CHARACTERS: u64 = 8000;
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WebFetchParams {
     /// Absolute HTTP or HTTPS URL to fetch and extract.
@@ -47,12 +49,13 @@ pub async fn execute_web_fetch(
     };
 
     let format_str = params.format.map(|f| f.as_str());
+    let max_characters = Some(params.max_characters.unwrap_or(DEFAULT_MAX_CHARACTERS));
 
     let req = FetchRequestBody {
         model: fetch_combo,
         url: &normalized_url,
         format: format_str,
-        max_characters: params.max_characters,
+        max_characters,
     };
 
     match client.fetch(&req).await {
