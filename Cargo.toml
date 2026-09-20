@@ -8,6 +8,10 @@ license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/alfa-reza/9router-web-mcp"
 
+[lib]
+name = "ninerouter_mcp_web"
+path = "src/lib.rs"
+
 [[bin]]
 name = "9router-mcp-web"
 path = "src/main.rs"
