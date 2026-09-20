@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-release:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            artifact_name: 9router-mcp-web-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            artifact_name: 9router-mcp-web-linux-aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/install-action@cross
+      - name: Build Release
+        run: cross build --target ${{ matrix.target }} --release --locked
+      - name: Package Archive
+        run: |
+          tar -czvf ${{ matrix.artifact_name }}.tar.gz -C target/${{ matrix.target }}/release 9router-mcp-web
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.tar.gz
+
+  publish:
+    name: Publish GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Compute Checksums
+        run: |
+          cd artifacts
+          find . -name "*.tar.gz" -exec cp {} . \;
+          sha256sum *.tar.gz > SHA256SUMS.txt
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS.txt
+          generate_release_notes: true
