@@ -1,5 +1,5 @@
-use url::Url;
 use crate::error::{AppError, Result};
+use url::Url;
 
 /// Validates an input URL and normalizes GitHub `/blob/` URLs to their raw equivalent.
 ///
@@ -17,8 +17,8 @@ pub fn validate_and_normalize_url(raw_url: &str) -> Result<String> {
         return Err(AppError::InvalidUrl("URL cannot be empty".to_string()));
     }
 
-    let parsed = Url::parse(trimmed)
-        .map_err(|e| AppError::InvalidUrl(format!("Malformed URL: {}", e)))?;
+    let parsed =
+        Url::parse(trimmed).map_err(|e| AppError::InvalidUrl(format!("Malformed URL: {}", e)))?;
 
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {

@@ -11,7 +11,8 @@ fn test_valid_github_blob_urls_rewritten() {
     );
 
     // Commit hash ref
-    let url_commit = "https://github.com/owner/repo/blob/d238e3fd0cd45bcce32a95ba09f7a3ece736e6e2/src/main.rs";
+    let url_commit =
+        "https://github.com/owner/repo/blob/d238e3fd0cd45bcce32a95ba09f7a3ece736e6e2/src/main.rs";
     assert_eq!(
         validate_and_normalize_url(url_commit).unwrap(),
         "https://raw.githubusercontent.com/owner/repo/d238e3fd0cd45bcce32a95ba09f7a3ece736e6e2/src/main.rs"
@@ -56,28 +57,52 @@ fn test_github_urls_not_rewritten() {
 
     // Already raw URL
     let already_raw = "https://raw.githubusercontent.com/owner/repo/main/README.md";
-    assert_eq!(validate_and_normalize_url(already_raw).unwrap(), already_raw);
+    assert_eq!(
+        validate_and_normalize_url(already_raw).unwrap(),
+        already_raw
+    );
 }
 
 #[test]
 fn test_non_github_urls_not_rewritten() {
     let regular_url = "https://example.com/some/path/blob/test.html";
-    assert_eq!(validate_and_normalize_url(regular_url).unwrap(), regular_url);
+    assert_eq!(
+        validate_and_normalize_url(regular_url).unwrap(),
+        regular_url
+    );
 }
 
 #[test]
 fn test_invalid_urls_rejected() {
     // Empty
-    assert!(matches!(validate_and_normalize_url(""), Err(AppError::InvalidUrl(_))));
-    assert!(matches!(validate_and_normalize_url("   "), Err(AppError::InvalidUrl(_))));
+    assert!(matches!(
+        validate_and_normalize_url(""),
+        Err(AppError::InvalidUrl(_))
+    ));
+    assert!(matches!(
+        validate_and_normalize_url("   "),
+        Err(AppError::InvalidUrl(_))
+    ));
 
     // Local file
-    assert!(matches!(validate_and_normalize_url("file:///etc/passwd"), Err(AppError::InvalidUrl(_))));
+    assert!(matches!(
+        validate_and_normalize_url("file:///etc/passwd"),
+        Err(AppError::InvalidUrl(_))
+    ));
 
     // Custom scheme
-    assert!(matches!(validate_and_normalize_url("gopher://example.com"), Err(AppError::InvalidUrl(_))));
-    assert!(matches!(validate_and_normalize_url("ftp://example.com/file"), Err(AppError::InvalidUrl(_))));
+    assert!(matches!(
+        validate_and_normalize_url("gopher://example.com"),
+        Err(AppError::InvalidUrl(_))
+    ));
+    assert!(matches!(
+        validate_and_normalize_url("ftp://example.com/file"),
+        Err(AppError::InvalidUrl(_))
+    ));
 
     // Malformed
-    assert!(matches!(validate_and_normalize_url("not a url"), Err(AppError::InvalidUrl(_))));
+    assert!(matches!(
+        validate_and_normalize_url("not a url"),
+        Err(AppError::InvalidUrl(_))
+    ));
 }

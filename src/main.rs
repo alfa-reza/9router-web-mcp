@@ -1,6 +1,7 @@
-use std::path::PathBuf;
 use ninerouter_mcp_web::config::{self, Config};
-use ninerouter_mcp_web::error::Result;
+use ninerouter_mcp_web::error::{AppError, Result};
+use ninerouter_mcp_web::server::NineRouterMcpServer;
+use std::path::PathBuf;
 
 fn parse_config_arg(args: &[String]) -> Option<PathBuf> {
     for i in 0..args.len() {
@@ -15,8 +16,9 @@ fn parse_config_arg(args: &[String]) -> Option<PathBuf> {
     None
 }
 
-fn main() -> Result<()> {
-    // Configure tracing strictly to stderr so stdout remains reserved for MCP JSON-RPC
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn main() -> Result<()> {
+    // Configure tracing strictly to stderr so stdout remains reserved exclusively for MCP JSON-RPC
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -64,9 +66,17 @@ fn main() -> Result<()> {
         search_combo = %config.search_combo,
         fetch_combo = %config.fetch_combo,
         api_key = %config.masked_api_key(),
-        "Resolved 9router-mcp-web configuration"
+        "Starting 9router-mcp-web STDIO server"
     );
 
-    eprintln!("9router-mcp-web ready (stdio)");
+    let (stdin, stdout) = rmcp::transport::io::stdio();
+    let server = NineRouterMcpServer::new(&config)?;
+
+    let running = rmcp::service::serve_server(server, (stdin, stdout))
+        .await
+        .map_err(|e| AppError::Config(format!("Failed to start MCP server: {}", e)))?;
+
+    let _ = running.waiting().await;
+
     Ok(())
 }

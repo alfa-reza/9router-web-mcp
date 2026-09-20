@@ -73,7 +73,7 @@ async fn test_fetch_endpoint_without_auth() {
     struct NoAuthHeaderMatcher;
     impl wiremock::Match for NoAuthHeaderMatcher {
         fn matches(&self, request: &wiremock::Request) -> bool {
-            !request.headers.contains_key(&wiremock::http::HeaderName::from_static("authorization"))
+            !request.headers.contains_key("authorization")
         }
     }
 
@@ -134,7 +134,9 @@ async fn test_all_upstream_error_codes() {
     // 1. 400 Bad Request
     Mock::given(method("POST"))
         .and(path("/v1/search"))
-        .respond_with(ResponseTemplate::new(400).set_body_json(json!({ "error": "Invalid domain filter" })))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({ "error": "Invalid domain filter" })),
+        )
         .up_to_n_times(1)
         .mount(&mock_server)
         .await;
@@ -156,7 +158,9 @@ async fn test_all_upstream_error_codes() {
     // 3. 429 Rate limited
     Mock::given(method("POST"))
         .and(path("/v1/search"))
-        .respond_with(ResponseTemplate::new(429).set_body_json(json!({ "message": "Rate limit exceeded" })))
+        .respond_with(
+            ResponseTemplate::new(429).set_body_json(json!({ "message": "Rate limit exceeded" })),
+        )
         .up_to_n_times(1)
         .mount(&mock_server)
         .await;
@@ -173,7 +177,9 @@ async fn test_all_upstream_error_codes() {
         .await;
 
     let err = client.search(&search_req).await.unwrap_err();
-    assert!(matches!(err, AppError::ServiceUnavailable(msg) if msg.contains("No provider available")));
+    assert!(
+        matches!(err, AppError::ServiceUnavailable(msg) if msg.contains("No provider available"))
+    );
 
     // 5. 500 Upstream server error
     Mock::given(method("POST"))
@@ -184,5 +190,8 @@ async fn test_all_upstream_error_codes() {
         .await;
 
     let err = client.search(&search_req).await.unwrap_err();
-    assert!(matches!(err, AppError::UpstreamServerError { status: 500, .. }));
+    assert!(matches!(
+        err,
+        AppError::UpstreamServerError { status: 500, .. }
+    ));
 }

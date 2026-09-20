@@ -82,12 +82,16 @@ impl Config {
             } else if let Ok(home) = std::env::var("HOME") {
                 PathBuf::from(home).join(".config")
             } else {
-                return Err(AppError::Config("Cannot determine HOME directory".to_string()));
+                return Err(AppError::Config(
+                    "Cannot determine HOME directory".to_string(),
+                ));
             }
         } else if let Ok(home) = std::env::var("HOME") {
             PathBuf::from(home).join(".config")
         } else {
-            return Err(AppError::Config("Cannot determine HOME directory".to_string()));
+            return Err(AppError::Config(
+                "Cannot determine HOME directory".to_string(),
+            ));
         };
 
         Ok(base_dir.join("9router-mcp-web").join("config.toml"))
@@ -99,11 +103,21 @@ impl Config {
             return Ok(None);
         }
 
-        let content = fs::read_to_string(path)
-            .map_err(|e| AppError::Config(format!("Failed to read config file {}: {}", path.display(), e)))?;
+        let content = fs::read_to_string(path).map_err(|e| {
+            AppError::Config(format!(
+                "Failed to read config file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
 
-        let raw: RawConfigFile = toml::from_str(&content)
-            .map_err(|e| AppError::Config(format!("Failed to parse config file {}: {}", path.display(), e)))?;
+        let raw: RawConfigFile = toml::from_str(&content).map_err(|e| {
+            AppError::Config(format!(
+                "Failed to parse config file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
 
         let base_url = raw
             .base_url
@@ -217,8 +231,13 @@ impl Config {
     /// Save configuration securely to disk with mode 0600 and directory mode 0700.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| AppError::Config(format!("Failed to create config directory {}: {}", parent.display(), e)))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                AppError::Config(format!(
+                    "Failed to create config directory {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
 
             // Set parent directory permissions to 0700
             #[cfg(unix)]
@@ -239,39 +258,68 @@ impl Config {
                 .write(true)
                 .truncate(true)
                 .open(&tmp_path)
-                .map_err(|e| AppError::Config(format!("Failed to create temp config file {}: {}", tmp_path.display(), e)))?;
+                .map_err(|e| {
+                    AppError::Config(format!(
+                        "Failed to create temp config file {}: {}",
+                        tmp_path.display(),
+                        e
+                    ))
+                })?;
 
             #[cfg(unix)]
             {
                 let perms = fs::Permissions::from_mode(0o600);
-                file.set_permissions(perms)
-                    .map_err(|e| AppError::Config(format!("Failed to set 0600 permissions on {}: {}", tmp_path.display(), e)))?;
+                file.set_permissions(perms).map_err(|e| {
+                    AppError::Config(format!(
+                        "Failed to set 0600 permissions on {}: {}",
+                        tmp_path.display(),
+                        e
+                    ))
+                })?;
             }
 
-            file.write_all(toml_str.as_bytes())
-                .map_err(|e| AppError::Config(format!("Failed to write to temp config file {}: {}", tmp_path.display(), e)))?;
+            file.write_all(toml_str.as_bytes()).map_err(|e| {
+                AppError::Config(format!(
+                    "Failed to write to temp config file {}: {}",
+                    tmp_path.display(),
+                    e
+                ))
+            })?;
 
-            file.sync_all()
-                .map_err(|e| AppError::Config(format!("Failed to flush temp config file {}: {}", tmp_path.display(), e)))?;
+            file.sync_all().map_err(|e| {
+                AppError::Config(format!(
+                    "Failed to flush temp config file {}: {}",
+                    tmp_path.display(),
+                    e
+                ))
+            })?;
         }
 
-        fs::rename(&tmp_path, path)
-            .map_err(|e| AppError::Config(format!("Failed to atomically rename {} to {}: {}", tmp_path.display(), path.display(), e)))?;
+        fs::rename(&tmp_path, path).map_err(|e| {
+            AppError::Config(format!(
+                "Failed to atomically rename {} to {}: {}",
+                tmp_path.display(),
+                path.display(),
+                e
+            ))
+        })?;
 
         Ok(())
     }
 
     /// Check if plaintext HTTP is used with an API key against a non-local host (R-CFG-07).
     pub fn check_plain_http_warning(&self) -> Option<String> {
-        if self.api_key.is_none() {
-            return None;
-        }
+        self.api_key.as_ref()?;
 
         if let Ok(parsed) = Url::parse(&self.base_url) {
             if parsed.scheme() == "http" {
                 if let Some(host) = parsed.host_str() {
                     let host_lower = host.to_lowercase();
-                    if host_lower != "localhost" && host_lower != "127.0.0.1" && host_lower != "::1" && host_lower != "[::1]" {
+                    if host_lower != "localhost"
+                        && host_lower != "127.0.0.1"
+                        && host_lower != "::1"
+                        && host_lower != "[::1]"
+                    {
                         return Some(format!(
                             "WARNING: 9Router API key is configured over unencrypted plaintext HTTP to non-local host '{}'. Credentials may be intercepted in transit!",
                             host
@@ -334,7 +382,10 @@ pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<
     } else {
         String::new()
     };
-    eprint!("9Router API key (leave empty to keep/skip){}: ", current_key_status);
+    eprint!(
+        "9Router API key (leave empty to keep/skip){}: ",
+        current_key_status
+    );
     io::stderr().flush().ok();
     let api_key = match rpassword::prompt_password("") {
         Ok(pass) => {
@@ -390,7 +441,9 @@ pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<
     let timeout_secs = if timeout_trimmed.is_empty() {
         existing.timeout_secs
     } else {
-        timeout_trimmed.parse::<u64>().unwrap_or(existing.timeout_secs)
+        timeout_trimmed
+            .parse::<u64>()
+            .unwrap_or(existing.timeout_secs)
     };
 
     let updated_config = Config {
@@ -409,6 +462,9 @@ pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<
     updated_config.save(&target_path)?;
 
     eprintln!();
-    eprintln!("Configuration saved successfully to: {}", target_path.display());
+    eprintln!(
+        "Configuration saved successfully to: {}",
+        target_path.display()
+    );
     Ok(())
 }

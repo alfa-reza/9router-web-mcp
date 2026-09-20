@@ -1,9 +1,9 @@
-use std::time::Duration;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::redirect::Policy;
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::Value;
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::error::{AppError, Result};
@@ -72,7 +72,11 @@ impl NineRouterClient {
 
         // Custom redirect policy: do NOT forward Authorization to different hosts (R-UP-05, S-10)
         let redirect_policy = Policy::custom(|attempt| {
-            if attempt.previous().iter().any(|prev| prev.host() != attempt.url().host()) {
+            if attempt
+                .previous()
+                .iter()
+                .any(|prev| prev.host() != attempt.url().host())
+            {
                 // Prevent following redirects to different host when credentials are involved
                 attempt.stop()
             } else if attempt.previous().len() >= 10 {

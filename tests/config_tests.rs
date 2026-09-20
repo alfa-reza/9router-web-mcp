@@ -1,10 +1,10 @@
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use tempfile::tempdir;
 use ninerouter_mcp_web::config::{
     normalize_base_url, Config, DEFAULT_BASE_URL, DEFAULT_FETCH_COMBO, DEFAULT_SEARCH_COMBO,
     DEFAULT_TIMEOUT_SECS,
 };
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use tempfile::tempdir;
 
 #[test]
 fn test_default_config() {
@@ -18,10 +18,22 @@ fn test_default_config() {
 
 #[test]
 fn test_normalize_base_url() {
-    assert_eq!(normalize_base_url("http://localhost:20128/"), "http://localhost:20128");
-    assert_eq!(normalize_base_url("http://localhost:20128///"), "http://localhost:20128//");
-    assert_eq!(normalize_base_url("https://example.com/api/v1/"), "https://example.com/api/v1");
-    assert_eq!(normalize_base_url("https://example.com/api/v1"), "https://example.com/api/v1");
+    assert_eq!(
+        normalize_base_url("http://localhost:20128/"),
+        "http://localhost:20128"
+    );
+    assert_eq!(
+        normalize_base_url("http://localhost:20128///"),
+        "http://localhost:20128//"
+    );
+    assert_eq!(
+        normalize_base_url("https://example.com/api/v1/"),
+        "https://example.com/api/v1"
+    );
+    assert_eq!(
+        normalize_base_url("https://example.com/api/v1"),
+        "https://example.com/api/v1"
+    );
 }
 
 #[test]
@@ -124,18 +136,29 @@ fn test_plain_http_warning() {
     };
     let warning = remote_http_with_key.check_plain_http_warning();
     assert!(warning.is_some());
-    assert!(warning.unwrap().contains("WARNING: 9Router API key is configured over unencrypted plaintext HTTP"));
+    assert!(warning
+        .unwrap()
+        .contains("WARNING: 9Router API key is configured over unencrypted plaintext HTTP"));
 }
 
 #[test]
 fn test_masked_api_key() {
-    let no_key = Config { api_key: None, ..Default::default() };
+    let no_key = Config {
+        api_key: None,
+        ..Default::default()
+    };
     assert_eq!(no_key.masked_api_key(), "(none)");
 
-    let short_key = Config { api_key: Some("secret".to_string()), ..Default::default() };
+    let short_key = Config {
+        api_key: Some("secret".to_string()),
+        ..Default::default()
+    };
     assert_eq!(short_key.masked_api_key(), "***");
 
-    let long_key = Config { api_key: Some("sk-1234567890abcdef".to_string()), ..Default::default() };
+    let long_key = Config {
+        api_key: Some("sk-1234567890abcdef".to_string()),
+        ..Default::default()
+    };
     assert_eq!(long_key.masked_api_key(), "sk-...cdef");
 }
 
@@ -175,4 +198,3 @@ fn test_env_overrides_precedence() {
     assert_eq!(resolved.fetch_combo, "env-fetch");
     assert_eq!(resolved.timeout_secs, 50);
 }
-
