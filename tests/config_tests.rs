@@ -1,9 +1,10 @@
 use ninerouter_mcp_web::config::{
-    normalize_base_url, Config, DEFAULT_BASE_URL, DEFAULT_FETCH_COMBO, DEFAULT_SEARCH_COMBO,
-    DEFAULT_TIMEOUT_SECS,
+    normalize_base_url, parse_config_arg, validate_and_normalize_base_url, Config,
+    DEFAULT_BASE_URL, DEFAULT_FETCH_COMBO, DEFAULT_SEARCH_COMBO, DEFAULT_TIMEOUT_SECS,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use tempfile::tempdir;
 
 #[test]
@@ -24,7 +25,7 @@ fn test_normalize_base_url() {
     );
     assert_eq!(
         normalize_base_url("http://localhost:20128///"),
-        "http://localhost:20128//"
+        "http://localhost:20128"
     );
     assert_eq!(
         normalize_base_url("https://example.com/api/v1/"),
@@ -160,6 +161,159 @@ fn test_masked_api_key() {
         ..Default::default()
     };
     assert_eq!(long_key.masked_api_key(), "sk-...cdef");
+
+    // Multibyte UTF-8 tests (avoid byte-slice panics)
+    let multibyte_short = Config {
+        api_key: Some("🔑秘密キー".to_string()), // 6 characters
+        ..Default::default()
+    };
+    assert_eq!(multibyte_short.masked_api_key(), "***");
+
+    let multibyte_long = Config {
+        api_key: Some("🔑秘密APIキー12345".to_string()), // 14 characters
+        ..Default::default()
+    };
+    assert_eq!(multibyte_long.masked_api_key(), "🔑秘密...2345");
+}
+
+#[test]
+fn test_save_permissions_existing_parent_preserved() {
+    let dir = tempdir().unwrap();
+    let parent = dir.path().join("existing_dir");
+    fs::create_dir_all(&parent).unwrap();
+
+    // Set existing parent permissions to 0755
+    let perms = fs::Permissions::from_mode(0o755);
+    fs::set_permissions(&parent, perms).unwrap();
+
+    let config_path = parent.join("config.toml");
+    let cfg = Config::default();
+    cfg.save(&config_path).expect("Failed to save config");
+
+    // Existing parent permissions must remain 0755 (not overwritten to 0700)
+    let parent_meta = fs::metadata(&parent).unwrap();
+    assert_eq!(parent_meta.permissions().mode() & 0o777, 0o755);
+
+    // File permissions must still be 0600
+    let file_meta = fs::metadata(&config_path).unwrap();
+    assert_eq!(file_meta.permissions().mode() & 0o777, 0o600);
+}
+
+#[test]
+fn test_validate_and_normalize_base_url_detailed() {
+    // Valid cases
+    assert_eq!(
+        validate_and_normalize_base_url("http://localhost:20128").unwrap(),
+        "http://localhost:20128"
+    );
+    assert_eq!(
+        validate_and_normalize_base_url("http://localhost:20128/").unwrap(),
+        "http://localhost:20128"
+    );
+    assert_eq!(
+        validate_and_normalize_base_url("http://localhost:20128///").unwrap(),
+        "http://localhost:20128"
+    );
+    assert_eq!(
+        validate_and_normalize_base_url("https://api.example.com/v1///").unwrap(),
+        "https://api.example.com/v1"
+    );
+
+    // Invalid scheme
+    assert!(validate_and_normalize_base_url("ftp://localhost:20128").is_err());
+    assert!(validate_and_normalize_base_url("ws://localhost:20128").is_err());
+
+    // Invalid / missing host or malformed URL
+    assert!(validate_and_normalize_base_url("not-a-url").is_err());
+    assert!(validate_and_normalize_base_url("http://").is_err());
+    assert!(validate_and_normalize_base_url("http://:8080").is_err());
+
+    // Query params or fragments
+    assert!(validate_and_normalize_base_url("http://localhost:20128?foo=bar").is_err());
+    assert!(validate_and_normalize_base_url("http://localhost:20128#section").is_err());
+
+    // Empty / whitespace
+    assert!(validate_and_normalize_base_url("").is_err());
+    assert!(validate_and_normalize_base_url("   ").is_err());
+}
+
+#[test]
+fn test_resolve_path_precedence() {
+    let dir = tempdir().unwrap();
+    let cli_path = dir.path().join("cli_config.toml");
+    let env_path = dir.path().join("env_config.toml");
+
+    // 1. CLI override takes highest precedence
+    std::env::set_var("NINEROUTER_CONFIG", env_path.to_str().unwrap());
+    let resolved = Config::resolve_path(Some(&cli_path)).unwrap();
+    assert_eq!(resolved, cli_path);
+
+    // 2. Empty CLI override returns error
+    let empty_cli = PathBuf::from("  ");
+    assert!(Config::resolve_path(Some(&empty_cli)).is_err());
+
+    // 3. Fallback to NINEROUTER_CONFIG if no CLI override
+    let resolved_env = Config::resolve_path(None).unwrap();
+    assert_eq!(resolved_env, env_path);
+
+    // 4. Default path when neither is provided
+    std::env::remove_var("NINEROUTER_CONFIG");
+    let resolved_default = Config::resolve_path(None).unwrap();
+    assert!(resolved_default.ends_with("9router-mcp-web/config.toml"));
+}
+
+#[test]
+fn test_parse_config_arg() {
+    // --config <path>
+    let args = vec!["prog".into(), "--config".into(), "/my/config.toml".into()];
+    assert_eq!(
+        parse_config_arg(&args).unwrap(),
+        Some(PathBuf::from("/my/config.toml"))
+    );
+
+    // -c <path>
+    let args = vec!["prog".into(), "-c".into(), "/my/config.toml".into()];
+    assert_eq!(
+        parse_config_arg(&args).unwrap(),
+        Some(PathBuf::from("/my/config.toml"))
+    );
+
+    // --config=<path>
+    let args = vec!["prog".into(), "--config=/my/config.toml".into()];
+    assert_eq!(
+        parse_config_arg(&args).unwrap(),
+        Some(PathBuf::from("/my/config.toml"))
+    );
+
+    // Missing value after --config
+    let args = vec!["prog".into(), "--config".into()];
+    assert!(parse_config_arg(&args).is_err());
+
+    // Missing value after -c
+    let args = vec!["prog".into(), "-c".into()];
+    assert!(parse_config_arg(&args).is_err());
+
+    // Empty value for --config
+    let args = vec!["prog".into(), "--config".into(), "".into()];
+    assert!(parse_config_arg(&args).is_err());
+
+    // Empty value for --config=
+    let args = vec!["prog".into(), "--config=".into()];
+    assert!(parse_config_arg(&args).is_err());
+
+    // No config argument present
+    let args = vec!["prog".into(), "--help".into()];
+    assert_eq!(parse_config_arg(&args).unwrap(), None);
+}
+
+#[test]
+fn test_timeout_zero_rejected() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    fs::write(&config_path, "timeout_secs = 0\n").unwrap();
+
+    let loaded = Config::load_from_file(&config_path);
+    assert!(loaded.is_err());
 }
 
 #[test]

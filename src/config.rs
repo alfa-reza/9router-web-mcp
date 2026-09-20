@@ -1,8 +1,10 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use url::Url;
+
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 use crate::error::{AppError, Result};
 
@@ -67,9 +69,68 @@ struct RawNineRouterTable {
     timeout_secs: Option<u64>,
 }
 
-pub fn normalize_base_url(url: &str) -> String {
+/// Validates and normalizes the 9Router base URL.
+///
+/// Rules:
+/// - Must be an absolute HTTP or HTTPS URL.
+/// - Must have a valid host.
+/// - Must not contain query parameters or fragments.
+/// - Trailing slashes are stripped deterministically while preserving any path prefix.
+pub fn validate_and_normalize_base_url(url: &str) -> Result<String> {
     let trimmed = url.trim();
-    trimmed.strip_suffix('/').unwrap_or(trimmed).to_string()
+    if trimmed.is_empty() {
+        return Err(AppError::Config(
+            "9Router base URL cannot be empty".to_string(),
+        ));
+    }
+
+    let parsed = Url::parse(trimmed)
+        .map_err(|e| AppError::Config(format!("Invalid 9Router base URL '{}': {}", trimmed, e)))?;
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(AppError::Config(format!(
+            "Unsupported scheme '{}' in 9Router base URL. Only http and https are allowed",
+            scheme
+        )));
+    }
+
+    match parsed.host_str() {
+        Some(h) if !h.is_empty() => {}
+        _ => {
+            return Err(AppError::Config(format!(
+                "9Router base URL '{}' must include a valid host",
+                trimmed
+            )));
+        }
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(AppError::Config(format!(
+            "9Router base URL '{}' must not contain query parameters or fragments",
+            trimmed
+        )));
+    }
+
+    let mut normalized = parsed;
+    let path = normalized.path().to_string();
+    let trimmed_path = path.trim_end_matches('/');
+    normalized.set_path(trimmed_path);
+
+    let mut result = normalized.to_string();
+    if result.ends_with('/') {
+        result.pop();
+    }
+
+    Ok(result)
+}
+
+/// Normalizes a base URL string, falling back to trimmed stripped-slash if parsing fails.
+pub fn normalize_base_url(url: &str) -> String {
+    validate_and_normalize_base_url(url).unwrap_or_else(|_| {
+        let trimmed = url.trim();
+        trimmed.trim_end_matches('/').to_string()
+    })
 }
 
 impl Config {
@@ -97,6 +158,31 @@ impl Config {
         Ok(base_dir.join("9router-mcp-web").join("config.toml"))
     }
 
+    /// Resolve configuration path following precedence:
+    /// 1. Explicit CLI override
+    /// 2. NINEROUTER_CONFIG environment variable
+    /// 3. Default path (~/.config/9router-mcp-web/config.toml)
+    pub fn resolve_path(override_path: Option<&Path>) -> Result<PathBuf> {
+        if let Some(p) = override_path {
+            let p_str = p.to_string_lossy();
+            if p_str.trim().is_empty() {
+                return Err(AppError::Config(
+                    "Configuration path cannot be empty".to_string(),
+                ));
+            }
+            return Ok(p.to_path_buf());
+        }
+
+        if let Ok(env_path) = std::env::var("NINEROUTER_CONFIG") {
+            let trimmed = env_path.trim();
+            if !trimmed.is_empty() {
+                return Ok(PathBuf::from(trimmed));
+            }
+        }
+
+        Self::default_path()
+    }
+
     /// Load config from file if it exists, returning None if file does not exist.
     pub fn load_from_file(path: &Path) -> Result<Option<Self>> {
         if !path.exists() {
@@ -119,10 +205,12 @@ impl Config {
             ))
         })?;
 
-        let base_url = raw
+        let raw_base_url = raw
             .base_url
             .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.base_url.clone()))
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+
+        let base_url = validate_and_normalize_base_url(&raw_base_url)?;
 
         let api_key = raw
             .api_key
@@ -151,8 +239,14 @@ impl Config {
             .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.timeout_secs))
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
+        if timeout_secs == 0 {
+            return Err(AppError::Config(
+                "timeout_secs must be greater than 0".to_string(),
+            ));
+        }
+
         Ok(Some(Self {
-            base_url: normalize_base_url(&base_url),
+            base_url,
             api_key,
             search_combo: search_combo.trim().to_string(),
             fetch_combo: fetch_combo.trim().to_string(),
@@ -163,32 +257,20 @@ impl Config {
     /// Resolve configuration using precedence:
     /// Environment Variables > File Configuration > Defaults
     pub fn resolve(config_path_override: Option<&Path>) -> Result<Self> {
-        let config_path = match config_path_override {
-            Some(p) => p.to_path_buf(),
-            None => {
-                if let Ok(env_path) = std::env::var("NINEROUTER_CONFIG") {
-                    if !env_path.trim().is_empty() {
-                        PathBuf::from(env_path.trim())
-                    } else {
-                        Self::default_path()?
-                    }
-                } else {
-                    Self::default_path()?
-                }
-            }
-        };
-
+        let config_path = Self::resolve_path(config_path_override)?;
         let file_config = Self::load_from_file(&config_path)?.unwrap_or_default();
 
         // 1. Base URL override
-        let base_url = std::env::var("NINEROUTER_URL")
+        let base_url = if let Some(env_url) = std::env::var("NINEROUTER_URL")
             .or_else(|_| std::env::var("NINEROUTER_BASE_URL"))
             .ok()
             .map(|u| u.trim().to_string())
             .filter(|u| !u.is_empty())
-            .unwrap_or(file_config.base_url);
-
-        let normalized_base_url = normalize_base_url(&base_url);
+        {
+            validate_and_normalize_base_url(&env_url)?
+        } else {
+            file_config.base_url
+        };
 
         // 2. API Key override
         let api_key = std::env::var("NINEROUTER_KEY")
@@ -214,13 +296,29 @@ impl Config {
 
         // 5. Timeout override
         let timeout_secs = if let Ok(t) = std::env::var("NINEROUTER_TIMEOUT_SECS") {
-            t.trim().parse::<u64>().unwrap_or(file_config.timeout_secs)
+            let trimmed = t.trim();
+            if trimmed.is_empty() {
+                file_config.timeout_secs
+            } else {
+                let parsed = trimmed.parse::<u64>().map_err(|_| {
+                    AppError::Config(format!(
+                        "Invalid timeout '{}' in NINEROUTER_TIMEOUT_SECS: must be a positive integer",
+                        trimmed
+                    ))
+                })?;
+                if parsed == 0 {
+                    return Err(AppError::Config(
+                        "Timeout in NINEROUTER_TIMEOUT_SECS must be greater than 0".to_string(),
+                    ));
+                }
+                parsed
+            }
         } else {
             file_config.timeout_secs
         };
 
         Ok(Self {
-            base_url: normalized_base_url,
+            base_url,
             api_key,
             search_combo,
             fetch_combo,
@@ -228,22 +326,36 @@ impl Config {
         })
     }
 
-    /// Save configuration securely to disk with mode 0600 and directory mode 0700.
+    /// Save configuration securely to disk with mode 0600 on Unix.
+    ///
+    /// If the parent directory does not exist, it is created with mode 0700 on Unix.
+    /// If the parent directory already exists, its permissions are left untouched.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                AppError::Config(format!(
-                    "Failed to create config directory {}: {}",
-                    parent.display(),
-                    e
-                ))
-            })?;
-
-            // Set parent directory permissions to 0700
-            #[cfg(unix)]
-            {
-                let perms = fs::Permissions::from_mode(0o700);
-                let _ = fs::set_permissions(parent, perms);
+            if !parent.exists() {
+                #[cfg(unix)]
+                {
+                    let mut builder = fs::DirBuilder::new();
+                    builder.recursive(true);
+                    builder.mode(0o700);
+                    builder.create(parent).map_err(|e| {
+                        AppError::Config(format!(
+                            "Failed to create config directory {}: {}",
+                            parent.display(),
+                            e
+                        ))
+                    })?;
+                }
+                #[cfg(not(unix))]
+                {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        AppError::Config(format!(
+                            "Failed to create config directory {}: {}",
+                            parent.display(),
+                            e
+                        ))
+                    })?;
+                }
             }
         }
 
@@ -253,29 +365,26 @@ impl Config {
         let tmp_path = path.with_extension("tmp");
 
         {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&tmp_path)
-                .map_err(|e| {
-                    AppError::Config(format!(
-                        "Failed to create temp config file {}: {}",
-                        tmp_path.display(),
-                        e
-                    ))
-                })?;
+            let mut options = OpenOptions::new();
+            options.create(true).write(true).truncate(true);
+
+            #[cfg(unix)]
+            {
+                options.mode(0o600);
+            }
+
+            let mut file = options.open(&tmp_path).map_err(|e| {
+                AppError::Config(format!(
+                    "Failed to create temp config file {}: {}",
+                    tmp_path.display(),
+                    e
+                ))
+            })?;
 
             #[cfg(unix)]
             {
                 let perms = fs::Permissions::from_mode(0o600);
-                file.set_permissions(perms).map_err(|e| {
-                    AppError::Config(format!(
-                        "Failed to set 0600 permissions on {}: {}",
-                        tmp_path.display(),
-                        e
-                    ))
-                })?;
+                let _ = file.set_permissions(perms);
             }
 
             file.write_all(toml_str.as_bytes()).map_err(|e| {
@@ -332,15 +441,18 @@ impl Config {
     }
 
     /// Return a safe, masked representation of the API key for diagnostics.
+    ///
+    /// Character-based to prevent panicking on multibyte UTF-8 boundaries.
     pub fn masked_api_key(&self) -> String {
         match &self.api_key {
             None => "(none)".to_string(),
             Some(key) => {
-                if key.len() <= 8 {
+                let chars: Vec<char> = key.chars().collect();
+                if chars.len() <= 8 {
                     "***".to_string()
                 } else {
-                    let prefix = &key[..3];
-                    let suffix = &key[key.len() - 4..];
+                    let prefix: String = chars[..3].iter().collect();
+                    let suffix: String = chars[chars.len() - 4..].iter().collect();
                     format!("{}...{}", prefix, suffix)
                 }
             }
@@ -350,10 +462,7 @@ impl Config {
 
 /// Run the interactive `configure` CLI flow.
 pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<()> {
-    let target_path = match config_path_override {
-        Some(p) => p.to_path_buf(),
-        None => Config::default_path()?,
-    };
+    let target_path = Config::resolve_path(config_path_override)?;
 
     let existing = Config::load_from_file(&target_path)?.unwrap_or_default();
 
@@ -373,12 +482,15 @@ pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<
     let base_url = if base_url_trimmed.is_empty() {
         existing.base_url.clone()
     } else {
-        normalize_base_url(base_url_trimmed)
+        validate_and_normalize_base_url(base_url_trimmed)?
     };
 
-    // 2. API Key (masked input)
+    // 2. API Key (masked input, explicit clearing via '-' supported)
     let current_key_status = if existing.api_key.is_some() {
-        format!(" (current: {})", existing.masked_api_key())
+        format!(
+            " (current: {}, enter '-' to clear)",
+            existing.masked_api_key()
+        )
     } else {
         String::new()
     };
@@ -387,25 +499,21 @@ pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<
         current_key_status
     );
     io::stderr().flush().ok();
-    let api_key = match rpassword::prompt_password("") {
-        Ok(pass) => {
-            let pass_trimmed = pass.trim().to_string();
-            if pass_trimmed.is_empty() {
-                existing.api_key
-            } else {
-                Some(pass_trimmed)
-            }
-        }
+    let raw_key_input = match rpassword::prompt_password("") {
+        Ok(pass) => pass.trim().to_string(),
         Err(_) => {
             let mut line = String::new();
             reader.read_line(&mut line).ok();
-            let line_trimmed = line.trim().to_string();
-            if line_trimmed.is_empty() {
-                existing.api_key
-            } else {
-                Some(line_trimmed)
-            }
+            line.trim().to_string()
         }
+    };
+
+    let api_key = if raw_key_input == "-" || raw_key_input == "none" || raw_key_input == "clear" {
+        None
+    } else if raw_key_input.is_empty() {
+        existing.api_key
+    } else {
+        Some(raw_key_input)
     };
 
     // 3. Search Combo
@@ -441,9 +549,18 @@ pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<
     let timeout_secs = if timeout_trimmed.is_empty() {
         existing.timeout_secs
     } else {
-        timeout_trimmed
-            .parse::<u64>()
-            .unwrap_or(existing.timeout_secs)
+        let parsed = timeout_trimmed.parse::<u64>().map_err(|_| {
+            AppError::Config(format!(
+                "Invalid timeout '{}': must be a positive integer",
+                timeout_trimmed
+            ))
+        })?;
+        if parsed == 0 {
+            return Err(AppError::Config(
+                "Timeout must be greater than 0 seconds".to_string(),
+            ));
+        }
+        parsed
     };
 
     let updated_config = Config {
@@ -467,4 +584,40 @@ pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<
         target_path.display()
     );
     Ok(())
+}
+
+/// Parse the optional configuration file path from command line arguments.
+///
+/// Returns `Ok(Some(PathBuf))` if `--config <PATH>`, `-c <PATH>`, or `--config=<PATH>` is present.
+/// Returns `Ok(None)` if no config flag was passed.
+/// Returns an error if the flag is provided without a non-empty path.
+pub fn parse_config_arg(args: &[String]) -> Result<Option<PathBuf>> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--config" || args[i] == "-c" {
+            if i + 1 < args.len() {
+                let val = args[i + 1].trim();
+                if val.is_empty() {
+                    return Err(AppError::Config(
+                        "Flag '--config' / '-c' requires a non-empty path argument".to_string(),
+                    ));
+                }
+                return Ok(Some(PathBuf::from(val)));
+            } else {
+                return Err(AppError::Config(
+                    "Flag '--config' / '-c' requires a path argument".to_string(),
+                ));
+            }
+        } else if let Some(stripped) = args[i].strip_prefix("--config=") {
+            let val = stripped.trim();
+            if val.is_empty() {
+                return Err(AppError::Config(
+                    "Flag '--config=' requires a non-empty path argument".to_string(),
+                ));
+            }
+            return Ok(Some(PathBuf::from(val)));
+        }
+        i += 1;
+    }
+    Ok(None)
 }
