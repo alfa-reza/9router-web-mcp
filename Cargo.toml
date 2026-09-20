@@ -1,0 +1,39 @@
+[package]
+name = "ninerouter-mcp-web"
+version = "0.1.0"
+edition = "2021"
+authors = ["Faturahman Alfareza <alfareza.dv@gmail.com>"]
+description = "Lightweight Model Context Protocol (MCP) server for 9Router Web Search and Web Fetch"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/alfa-reza/9router-web-mcp"
+
+[[bin]]
+name = "9router-mcp-web"
+path = "src/main.rs"
+
+[dependencies]
+rmcp = { version = "3.4.0", default-features = false, features = ["server", "macros", "transport-io", "transport-async-rw"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "io-util", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+schemars = { version = "1.0", features = ["derive"] }
+url = "2.5"
+toml = "0.8"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+rpassword = "7.3"
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
