@@ -379,3 +379,158 @@ async fn test_fetch_endpoint_401_and_403_distinct() {
     assert!(err.to_string().contains("403"));
     assert!(!err.to_string().contains("401"));
 }
+
+#[test]
+fn test_endpoint_url_construction_all_base_url_variations() {
+    let test_cases = vec![
+        // (input_base_url, expected_search, expected_fetch)
+        (
+            "http://host:20128",
+            "http://host:20128/v1/search",
+            "http://host:20128/v1/web/fetch",
+        ),
+        (
+            "http://host:20128/",
+            "http://host:20128/v1/search",
+            "http://host:20128/v1/web/fetch",
+        ),
+        (
+            "http://host:20128/v1",
+            "http://host:20128/v1/search",
+            "http://host:20128/v1/web/fetch",
+        ),
+        (
+            "http://host:20128/v1/",
+            "http://host:20128/v1/search",
+            "http://host:20128/v1/web/fetch",
+        ),
+        (
+            "https://example.com/router",
+            "https://example.com/router/v1/search",
+            "https://example.com/router/v1/web/fetch",
+        ),
+        (
+            "https://example.com/router/",
+            "https://example.com/router/v1/search",
+            "https://example.com/router/v1/web/fetch",
+        ),
+        (
+            "https://example.com/router/v1",
+            "https://example.com/router/v1/search",
+            "https://example.com/router/v1/web/fetch",
+        ),
+        (
+            "https://example.com/router/v1/",
+            "https://example.com/router/v1/search",
+            "https://example.com/router/v1/web/fetch",
+        ),
+        (
+            "https://example.com/api-v1",
+            "https://example.com/api-v1/v1/search",
+            "https://example.com/api-v1/v1/web/fetch",
+        ),
+    ];
+
+    for (base_url, expected_search, expected_fetch) in test_cases {
+        let config = Config {
+            base_url: base_url.to_string(),
+            ..Default::default()
+        };
+        let client = NineRouterClient::new(&config).expect("Client creation failed");
+
+        let search_url = client.endpoint_url("v1/search");
+        let fetch_url = client.endpoint_url("v1/web/fetch");
+
+        assert_eq!(
+            search_url, expected_search,
+            "Search endpoint mismatch for base_url: {}",
+            base_url
+        );
+        assert_eq!(
+            fetch_url, expected_fetch,
+            "Fetch endpoint mismatch for base_url: {}",
+            base_url
+        );
+
+        // Explicitly assert that /v1/v1/... is NEVER produced
+        assert!(
+            !search_url.contains("/v1/v1/search"),
+            "Search URL improperly contained /v1/v1/search for base_url: {}",
+            base_url
+        );
+        assert!(
+            !fetch_url.contains("/v1/v1/web/fetch"),
+            "Fetch URL improperly contained /v1/v1/web/fetch for base_url: {}",
+            base_url
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_client_observable_requests_with_and_without_v1_base_url() {
+    let mock_server = MockServer::start().await;
+
+    // Search and Fetch mock responses
+    let search_resp = json!({ "results": [{ "title": "Test", "url": "https://example.com" }] });
+    let fetch_resp = json!({ "content": "fetched content" });
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&search_resp))
+        .expect(3) // 3 tests: without /v1, with /v1, with /v1/
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/web/fetch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&fetch_resp))
+        .expect(3) // 3 tests: without /v1, with /v1, with /v1/
+        .mount(&mock_server)
+        .await;
+
+    let search_req = SearchRequestBody {
+        model: "search-combo",
+        query: "test query",
+        max_results: Some(1),
+        search_type: None,
+        country: None,
+        language: None,
+        time_range: None,
+        domain_filter: None,
+        provider_options: None,
+    };
+
+    let fetch_req = FetchRequestBody {
+        model: "fetch-combo",
+        url: "https://example.com",
+        format: Some("markdown"),
+        max_characters: Some(100),
+    };
+
+    // 1. Base URL without /v1: e.g. "http://127.0.0.1:PORT"
+    let cfg1 = Config {
+        base_url: mock_server.uri(),
+        ..Default::default()
+    };
+    let client1 = NineRouterClient::new(&cfg1).unwrap();
+    assert!(client1.search(&search_req).await.is_ok());
+    assert!(client1.fetch(&fetch_req).await.is_ok());
+
+    // 2. Base URL with /v1: e.g. "http://127.0.0.1:PORT/v1"
+    let cfg2 = Config {
+        base_url: format!("{}/v1", mock_server.uri()),
+        ..Default::default()
+    };
+    let client2 = NineRouterClient::new(&cfg2).unwrap();
+    assert!(client2.search(&search_req).await.is_ok());
+    assert!(client2.fetch(&fetch_req).await.is_ok());
+
+    // 3. Base URL with /v1/: e.g. "http://127.0.0.1:PORT/v1/"
+    let cfg3 = Config {
+        base_url: format!("{}/v1/", mock_server.uri()),
+        ..Default::default()
+    };
+    let client3 = NineRouterClient::new(&cfg3).unwrap();
+    assert!(client3.search(&search_req).await.is_ok());
+    assert!(client3.fetch(&fetch_req).await.is_ok());
+}

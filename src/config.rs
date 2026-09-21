@@ -512,7 +512,10 @@ pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<
     let mut reader = stdin.lock();
 
     // 1. Base URL
-    eprint!("9Router base URL [{}]: ", existing.base_url);
+    eprint!(
+        "9Router URL (with or without /v1) [{}]: ",
+        existing.base_url
+    );
     io::stderr().flush().ok();
     let mut base_url_input = String::new();
     reader.read_line(&mut base_url_input).ok();
@@ -524,18 +527,14 @@ pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<
     };
 
     // 2. API Key (masked input, explicit clearing via '-' supported)
-    let current_key_status = if existing.api_key.is_some() {
-        format!(
-            " (current: {}, enter '-' to clear)",
+    if existing.api_key.is_some() {
+        eprint!(
+            "9Router API key [current: {}] (Enter to keep, '-' to clear): ",
             existing.masked_api_key()
-        )
+        );
     } else {
-        String::new()
-    };
-    eprint!(
-        "9Router API key (leave empty to keep/skip){}: ",
-        current_key_status
-    );
+        eprint!("9Router API key (optional, press Enter to skip): ");
+    }
     io::stderr().flush().ok();
     let raw_key_input = match rpassword::prompt_password("") {
         Ok(pass) => pass.trim().to_string(),

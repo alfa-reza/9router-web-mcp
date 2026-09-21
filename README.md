@@ -56,8 +56,8 @@ Run the configuration wizard at any time:
 === 9router-mcp-web Configuration ===
 Config file destination: /home/user/.config/9router-mcp-web/config.toml
 
-9Router base URL [http://localhost:20128]: <press Enter to accept>
-9Router API key (leave empty to keep/skip): <masked input>
+9Router URL (with or without /v1) [http://localhost:20128]: <press Enter to accept>
+9Router API key (optional, press Enter to skip): <masked input>
 Search combo name [search-combo]: <press Enter to accept>
 Fetch combo name [fetch-combo]: <press Enter to accept>
 Request timeout in seconds [30]: <press Enter to accept>
@@ -70,7 +70,7 @@ Pressing **Enter** without typing a value selects the displayed default.
 ### Configuration File Format (`config.toml`)
 
 ```toml
-# 9Router base URL (required)
+# 9Router base URL (required; both with or without /v1, e.g. "http://localhost:20128" or "http://localhost:20128/v1")
 base_url = "http://localhost:20128"
 
 # Optional API key (if 9Router requires authentication)
@@ -90,7 +90,7 @@ Environment variables override persistent configuration:
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `NINEROUTER_URL` | 9Router base endpoint URL | `http://localhost:20128` |
+| `NINEROUTER_URL` | 9Router base endpoint URL (with or without `/v1`) | `http://localhost:20128` |
 | `NINEROUTER_KEY` | 9Router API bearer key | None (optional) |
 | `NINEROUTER_SEARCH_COMBO` | Web search combo name | `search-combo` |
 | `NINEROUTER_FETCH_COMBO` | Web fetch combo name | `fetch-combo` |

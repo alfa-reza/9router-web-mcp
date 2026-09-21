@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde::Serialize;
 use serde_json::Value;
 use std::time::Duration;
+use url::Url;
 
 use crate::config::{validate_and_normalize_base_url, Config};
 use crate::error::{AppError, Result};
@@ -105,10 +106,54 @@ impl NineRouterClient {
         })
     }
 
-    /// Base URL helper to construct full endpoint URL
-    fn endpoint_url(&self, path: &str) -> String {
+    /// Constructs the full endpoint URL for a given 9Router API path.
+    ///
+    /// Central Version 1 UX rule:
+    /// - If the configured Base URL already ends in path segment "v1", append the endpoint below it.
+    /// - Otherwise insert "v1" before the endpoint.
+    ///
+    /// This accepts both `http://host:port` and `http://host:port/v1` (and reverse-proxy prefixes
+    /// like `https://example.com/9router` and `https://example.com/9router/v1`) without producing
+    /// `/v1/v1/...`. Suffixes like `/api-v1` are not treated as `/v1`.
+    pub fn endpoint_url(&self, path: &str) -> String {
         let clean_path = path.strip_prefix('/').unwrap_or(path);
-        format!("{}/{}", self.base_url, clean_path)
+        let subpath = clean_path.strip_prefix("v1/").unwrap_or(clean_path);
+
+        if let Ok(mut url) = Url::parse(&self.base_url) {
+            let has_v1_suffix = url
+                .path_segments()
+                .and_then(|mut segs| segs.rfind(|s| !s.is_empty()))
+                == Some("v1");
+
+            let segments: Vec<&str> = if has_v1_suffix {
+                subpath.split('/').filter(|s| !s.is_empty()).collect()
+            } else {
+                std::iter::once("v1")
+                    .chain(subpath.split('/').filter(|s| !s.is_empty()))
+                    .collect()
+            };
+
+            let mutated = match url.path_segments_mut() {
+                Ok(mut path_segs) => {
+                    path_segs.pop_if_empty();
+                    path_segs.extend(&segments);
+                    true
+                }
+                Err(_) => false,
+            };
+
+            if mutated {
+                return url.to_string();
+            }
+        }
+
+        // Defensive fallback
+        let clean_base = self.base_url.trim_end_matches('/');
+        if clean_base.ends_with("/v1") {
+            format!("{}/{}", clean_base, subpath)
+        } else {
+            format!("{}/v1/{}", clean_base, subpath)
+        }
     }
 
     /// Send a request to 9Router with bounded response buffering and distinct error mapping

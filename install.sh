@@ -41,7 +41,9 @@ if [ -z "$VERSION" ]; then
     VERSION="$(curl -sSL -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')"
     if [ -z "$VERSION" ]; then
         echo "Error: Could not determine latest release version from GitHub API." >&2
-        echo "You can set VERSION manually: VERSION=v0.1.0 sh install.sh" >&2
+        echo "An existing published GitHub Release is required to install 9router-mcp-web." >&2
+        echo "If specifying a release manually, set VERSION to an existing release tag (e.g. VERSION=vX.Y.Z)." >&2
+        echo "Note: setting VERSION cannot install a release that does not exist on GitHub." >&2
         exit 1
     fi
 fi
