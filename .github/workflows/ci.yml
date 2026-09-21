@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   fmt:
     name: Rustfmt Check
@@ -39,6 +42,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Cargo check
+        run: cargo check --locked
       - name: Run tests
         run: cargo test --locked
       - name: Run installer tests
@@ -60,5 +65,3 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run shellcheck
         run: shellcheck install.sh tests/installer_tests.sh
-      - name: Run installer tests
-        run: sh tests/installer_tests.sh

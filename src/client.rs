@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::time::Duration;
 
-use crate::config::Config;
+use crate::config::{validate_and_normalize_base_url, Config};
 use crate::error::{AppError, Result};
 
 pub const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10 MB safety limit
@@ -57,6 +57,8 @@ pub struct FetchRequestBody<'a> {
 
 impl NineRouterClient {
     pub fn new(config: &Config) -> Result<Self> {
+        let base_url = validate_and_normalize_base_url(&config.base_url)?;
+
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -97,7 +99,7 @@ impl NineRouterClient {
 
         Ok(Self {
             client,
-            base_url: config.base_url.clone(),
+            base_url,
             api_key: config.api_key.clone(),
             timeout_secs: config.timeout_secs,
         })
@@ -167,7 +169,8 @@ impl NineRouterClient {
 
             return Err(match code {
                 400 => AppError::BadRequest(error_msg),
-                401 | 403 => AppError::AuthenticationFailed,
+                401 => AppError::AuthenticationFailed,
+                403 => AppError::Forbidden(error_msg),
                 429 => AppError::RateLimited(error_msg),
                 503 => AppError::ServiceUnavailable(error_msg),
                 _ => AppError::UpstreamServerError {

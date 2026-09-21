@@ -1,10 +1,10 @@
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use url::Url;
 
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 use crate::error::{AppError, Result};
 
@@ -86,6 +86,13 @@ pub fn validate_and_normalize_base_url(url: &str) -> Result<String> {
 
     let parsed = Url::parse(trimmed)
         .map_err(|e| AppError::Config(format!("Invalid 9Router base URL '{}': {}", trimmed, e)))?;
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(AppError::Config(
+            "9Router base URL must not contain embedded credentials (username or password)"
+                .to_string(),
+        ));
+    }
 
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
@@ -226,13 +233,37 @@ impl Config {
 
         let search_combo = raw
             .search_combo
-            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.search_combo.clone()))
-            .unwrap_or_else(default_search_combo);
+            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.search_combo.clone()));
+
+        let search_combo = match search_combo {
+            Some(s) => {
+                let trimmed = s.trim().to_string();
+                if trimmed.is_empty() {
+                    return Err(AppError::Config(
+                        "search_combo cannot be empty or whitespace-only".to_string(),
+                    ));
+                }
+                trimmed
+            }
+            None => default_search_combo(),
+        };
 
         let fetch_combo = raw
             .fetch_combo
-            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.fetch_combo.clone()))
-            .unwrap_or_else(default_fetch_combo);
+            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.fetch_combo.clone()));
+
+        let fetch_combo = match fetch_combo {
+            Some(f) => {
+                let trimmed = f.trim().to_string();
+                if trimmed.is_empty() {
+                    return Err(AppError::Config(
+                        "fetch_combo cannot be empty or whitespace-only".to_string(),
+                    ));
+                }
+                trimmed
+            }
+            None => default_fetch_combo(),
+        };
 
         let timeout_secs = raw
             .timeout_secs
@@ -248,8 +279,8 @@ impl Config {
         Ok(Some(Self {
             base_url,
             api_key,
-            search_combo: search_combo.trim().to_string(),
-            fetch_combo: fetch_combo.trim().to_string(),
+            search_combo,
+            fetch_combo,
             timeout_secs,
         }))
     }
@@ -331,85 +362,100 @@ impl Config {
     /// If the parent directory does not exist, it is created with mode 0700 on Unix.
     /// If the parent directory already exists, its permissions are left untouched.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                #[cfg(unix)]
-                {
-                    let mut builder = fs::DirBuilder::new();
-                    builder.recursive(true);
-                    builder.mode(0o700);
-                    builder.create(parent).map_err(|e| {
-                        AppError::Config(format!(
-                            "Failed to create config directory {}: {}",
-                            parent.display(),
-                            e
-                        ))
-                    })?;
-                }
-                #[cfg(not(unix))]
-                {
-                    fs::create_dir_all(parent).map_err(|e| {
-                        AppError::Config(format!(
-                            "Failed to create config directory {}: {}",
-                            parent.display(),
-                            e
-                        ))
-                    })?;
-                }
+        validate_and_normalize_base_url(&self.base_url)?;
+
+        let search_combo = self.search_combo.trim();
+        if search_combo.is_empty() {
+            return Err(AppError::Config(
+                "search_combo cannot be empty or whitespace-only".to_string(),
+            ));
+        }
+
+        let fetch_combo = self.fetch_combo.trim();
+        if fetch_combo.is_empty() {
+            return Err(AppError::Config(
+                "fetch_combo cannot be empty or whitespace-only".to_string(),
+            ));
+        }
+
+        if self.timeout_secs == 0 {
+            return Err(AppError::Config(
+                "timeout_secs must be greater than 0".to_string(),
+            ));
+        }
+
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+
+        if !parent.exists() {
+            #[cfg(unix)]
+            {
+                let mut builder = fs::DirBuilder::new();
+                builder.recursive(true);
+                builder.mode(0o700);
+                builder.create(parent).map_err(|e| {
+                    AppError::Config(format!(
+                        "Failed to create config directory {}: {}",
+                        parent.display(),
+                        e
+                    ))
+                })?;
+            }
+            #[cfg(not(unix))]
+            {
+                fs::create_dir_all(parent).map_err(|e| {
+                    AppError::Config(format!(
+                        "Failed to create config directory {}: {}",
+                        parent.display(),
+                        e
+                    ))
+                })?;
             }
         }
 
         let toml_str = toml::to_string_pretty(self)
             .map_err(|e| AppError::Config(format!("Failed to serialize config to TOML: {}", e)))?;
 
-        let tmp_path = path.with_extension("tmp");
+        let mut tmp_file = tempfile::Builder::new()
+            .prefix(".config.tmp.")
+            .tempfile_in(parent)
+            .map_err(|e| {
+                AppError::Config(format!(
+                    "Failed to create temporary config file in {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
 
+        #[cfg(unix)]
         {
-            let mut options = OpenOptions::new();
-            options.create(true).write(true).truncate(true);
-
-            #[cfg(unix)]
-            {
-                options.mode(0o600);
-            }
-
-            let mut file = options.open(&tmp_path).map_err(|e| {
+            let perms = fs::Permissions::from_mode(0o600);
+            tmp_file.as_file().set_permissions(perms).map_err(|e| {
                 AppError::Config(format!(
-                    "Failed to create temp config file {}: {}",
-                    tmp_path.display(),
-                    e
-                ))
-            })?;
-
-            #[cfg(unix)]
-            {
-                let perms = fs::Permissions::from_mode(0o600);
-                let _ = file.set_permissions(perms);
-            }
-
-            file.write_all(toml_str.as_bytes()).map_err(|e| {
-                AppError::Config(format!(
-                    "Failed to write to temp config file {}: {}",
-                    tmp_path.display(),
-                    e
-                ))
-            })?;
-
-            file.sync_all().map_err(|e| {
-                AppError::Config(format!(
-                    "Failed to flush temp config file {}: {}",
-                    tmp_path.display(),
+                    "Failed to set private permissions on temporary config file: {}",
                     e
                 ))
             })?;
         }
 
-        fs::rename(&tmp_path, path).map_err(|e| {
+        tmp_file.write_all(toml_str.as_bytes()).map_err(|e| {
             AppError::Config(format!(
-                "Failed to atomically rename {} to {}: {}",
-                tmp_path.display(),
-                path.display(),
+                "Failed to write config data to temporary file: {}",
                 e
+            ))
+        })?;
+
+        tmp_file.as_file().sync_all().map_err(|e| {
+            AppError::Config(format!("Failed to flush temporary config file: {}", e))
+        })?;
+
+        tmp_file.persist(path).map_err(|e| {
+            AppError::Config(format!(
+                "Failed to atomically replace config file at {}: {}",
+                path.display(),
+                e.error
             ))
         })?;
 

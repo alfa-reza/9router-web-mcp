@@ -352,3 +352,344 @@ fn test_env_overrides_precedence() {
     assert_eq!(resolved.fetch_combo, "env-fetch");
     assert_eq!(resolved.timeout_secs, 50);
 }
+
+#[test]
+fn test_save_preexisting_unrelated_temp_file_unchanged() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let unrelated_tmp = dir.path().join("config.tmp");
+    let unrelated_dot_tmp = dir.path().join(".config.tmp");
+
+    fs::write(&unrelated_tmp, "UNRELATED_TEMP_DATA_PRESERVED").unwrap();
+    fs::write(&unrelated_dot_tmp, "UNRELATED_DOT_TMP_DATA_PRESERVED").unwrap();
+
+    let cfg = Config {
+        base_url: "http://127.0.0.1:20128".to_string(),
+        api_key: Some("sk-test-key".to_string()),
+        search_combo: "test-search".to_string(),
+        fetch_combo: "test-fetch".to_string(),
+        timeout_secs: 15,
+    };
+
+    cfg.save(&config_path).expect("Save should succeed");
+
+    // Verify unrelated temporary files remain untouched
+    let tmp_content = fs::read_to_string(&unrelated_tmp).unwrap();
+    assert_eq!(tmp_content, "UNRELATED_TEMP_DATA_PRESERVED");
+
+    let dot_tmp_content = fs::read_to_string(&unrelated_dot_tmp).unwrap();
+    assert_eq!(dot_tmp_content, "UNRELATED_DOT_TMP_DATA_PRESERVED");
+
+    // Verify config file was correctly written and loaded
+    let loaded = Config::load_from_file(&config_path)
+        .expect("Load should succeed")
+        .expect("Config should exist");
+    assert_eq!(loaded, cfg);
+
+    // Verify private permissions on saved config
+    let metadata = fs::metadata(&config_path).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_save_temp_path_symlink_cannot_modify_target() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let target_file = dir.path().join("sensitive_target.txt");
+    let symlink_tmp = dir.path().join("config.tmp");
+    let dot_symlink_tmp = dir.path().join(".config.tmp");
+
+    fs::write(&target_file, "SENSITIVE_ORIGINAL_CONTENT").unwrap();
+    std::os::unix::fs::symlink(&target_file, &symlink_tmp).unwrap();
+    std::os::unix::fs::symlink(&target_file, &dot_symlink_tmp).unwrap();
+
+    let cfg = Config {
+        base_url: "http://127.0.0.1:20128".to_string(),
+        api_key: Some("sk-secret-token".to_string()),
+        search_combo: "search-model".to_string(),
+        fetch_combo: "fetch-model".to_string(),
+        timeout_secs: 30,
+    };
+
+    cfg.save(&config_path).expect("Save should succeed");
+
+    // Verify the target of the symlink was NOT overwritten or modified
+    let target_content = fs::read_to_string(&target_file).unwrap();
+    assert_eq!(target_content, "SENSITIVE_ORIGINAL_CONTENT");
+
+    // Verify symlinks still point to the target file
+    assert_eq!(fs::read_link(&symlink_tmp).unwrap(), target_file);
+    assert_eq!(fs::read_link(&dot_symlink_tmp).unwrap(), target_file);
+
+    // Verify config file was properly written
+    let loaded = Config::load_from_file(&config_path)
+        .expect("Load should succeed")
+        .expect("Config should exist");
+    assert_eq!(loaded, cfg);
+}
+
+#[test]
+fn test_save_existing_config_replacement_succeeds() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    let initial_cfg = Config {
+        base_url: "http://initial:20128".to_string(),
+        api_key: Some("sk-initial".to_string()),
+        search_combo: "initial-search".to_string(),
+        fetch_combo: "initial-fetch".to_string(),
+        timeout_secs: 10,
+    };
+    initial_cfg.save(&config_path).unwrap();
+
+    let updated_cfg = Config {
+        base_url: "http://updated:20128".to_string(),
+        api_key: Some("sk-updated".to_string()),
+        search_combo: "updated-search".to_string(),
+        fetch_combo: "updated-fetch".to_string(),
+        timeout_secs: 25,
+    };
+    updated_cfg.save(&config_path).unwrap();
+
+    let loaded = Config::load_from_file(&config_path)
+        .expect("Load failed")
+        .expect("Config should exist");
+    assert_eq!(loaded, updated_cfg);
+
+    let metadata = fs::metadata(&config_path).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+}
+
+#[test]
+fn test_empty_or_whitespace_persisted_search_combo_rejected() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    // Whitespace-only search_combo
+    fs::write(&config_path, "search_combo = \"   \"\n").unwrap();
+    let err = Config::load_from_file(&config_path).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("search_combo cannot be empty or whitespace-only"));
+
+    // Empty string search_combo
+    fs::write(&config_path, "search_combo = \"\"\n").unwrap();
+    let err = Config::load_from_file(&config_path).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("search_combo cannot be empty or whitespace-only"));
+
+    // Legacy table whitespace search_combo
+    let legacy_toml = "[ninerouter]\nsearch_combo = \"  \"\n";
+    fs::write(&config_path, legacy_toml).unwrap();
+    let err = Config::load_from_file(&config_path).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("search_combo cannot be empty or whitespace-only"));
+}
+
+#[test]
+fn test_empty_or_whitespace_persisted_fetch_combo_rejected() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    // Whitespace-only fetch_combo
+    fs::write(&config_path, "fetch_combo = \" \t \"\n").unwrap();
+    let err = Config::load_from_file(&config_path).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("fetch_combo cannot be empty or whitespace-only"));
+
+    // Empty string fetch_combo
+    fs::write(&config_path, "fetch_combo = \"\"\n").unwrap();
+    let err = Config::load_from_file(&config_path).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("fetch_combo cannot be empty or whitespace-only"));
+
+    // Legacy table whitespace fetch_combo
+    let legacy_toml = "[ninerouter]\nfetch_combo = \"  \"\n";
+    fs::write(&config_path, legacy_toml).unwrap();
+    let err = Config::load_from_file(&config_path).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("fetch_combo cannot be empty or whitespace-only"));
+}
+
+#[test]
+fn test_credentials_in_base_url_rejected_and_not_leaked() {
+    // Both user and password
+    let err =
+        validate_and_normalize_base_url("https://user:secret123@router.example.com").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("embedded credentials"));
+    assert!(!msg.contains("secret123"));
+
+    // Username only
+    let err = validate_and_normalize_base_url("http://admin@localhost:20128").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("embedded credentials"));
+    assert!(!msg.contains("admin"));
+
+    // Password only
+    let err = validate_and_normalize_base_url("http://:onlypass@localhost:20128").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("embedded credentials"));
+    assert!(!msg.contains("onlypass"));
+}
+
+#[test]
+fn test_failed_save_does_not_corrupt_existing_config() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    let initial_cfg = Config {
+        base_url: "http://127.0.0.1:20128".to_string(),
+        api_key: Some("sk-valid-key".to_string()),
+        search_combo: "valid-search".to_string(),
+        fetch_combo: "valid-fetch".to_string(),
+        timeout_secs: 30,
+    };
+    initial_cfg
+        .save(&config_path)
+        .expect("Initial save must succeed");
+
+    // 1. Attempt to save invalid config (timeout 0)
+    let invalid_timeout_cfg = Config {
+        timeout_secs: 0,
+        ..initial_cfg.clone()
+    };
+    let err = invalid_timeout_cfg.save(&config_path).unwrap_err();
+    assert!(err.to_string().contains("timeout_secs"));
+
+    // Verify existing config is untouched
+    let loaded = Config::load_from_file(&config_path).unwrap().unwrap();
+    assert_eq!(loaded, initial_cfg);
+
+    // 2. Attempt to save invalid config (whitespace search_combo)
+    let invalid_search_cfg = Config {
+        search_combo: "   ".to_string(),
+        ..initial_cfg.clone()
+    };
+    let err = invalid_search_cfg.save(&config_path).unwrap_err();
+    assert!(err.to_string().contains("search_combo"));
+
+    // Verify existing config is still untouched
+    let loaded = Config::load_from_file(&config_path).unwrap().unwrap();
+    assert_eq!(loaded, initial_cfg);
+
+    // 3. Attempt to save invalid config (credentials in base_url)
+    let invalid_url_cfg = Config {
+        base_url: "https://user:pass@router.com".to_string(),
+        ..initial_cfg.clone()
+    };
+    let err = invalid_url_cfg.save(&config_path).unwrap_err();
+    assert!(err.to_string().contains("embedded credentials"));
+
+    // Verify existing config is still untouched
+    let loaded = Config::load_from_file(&config_path).unwrap().unwrap();
+    assert_eq!(loaded, initial_cfg);
+
+    // 4. On Unix, make directory read-only to force filesystem error during save
+    #[cfg(unix)]
+    {
+        let perms = fs::Permissions::from_mode(0o500);
+        fs::set_permissions(dir.path(), perms).unwrap();
+
+        let valid_new_cfg = Config {
+            timeout_secs: 99,
+            ..initial_cfg.clone()
+        };
+        let res = valid_new_cfg.save(&config_path);
+        assert!(res.is_err());
+
+        // Restore write permissions to inspect
+        let restore_perms = fs::Permissions::from_mode(0o700);
+        fs::set_permissions(dir.path(), restore_perms).unwrap();
+
+        // Existing config MUST remain intact
+        let loaded = Config::load_from_file(&config_path).unwrap().unwrap();
+        assert_eq!(loaded, initial_cfg);
+    }
+}
+
+#[test]
+fn test_concurrent_saves_do_not_collide() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let dir = tempdir().unwrap();
+    let config_path = Arc::new(dir.path().join("config.toml"));
+
+    let mut handles = Vec::new();
+    for i in 1..=8 {
+        let path = Arc::clone(&config_path);
+        let handle = thread::spawn(move || {
+            let cfg = Config {
+                base_url: "http://127.0.0.1:20128".to_string(),
+                api_key: Some(format!("sk-test-{}", i)),
+                search_combo: format!("search-model-{}", i),
+                fetch_combo: format!("fetch-model-{}", i),
+                timeout_secs: i as u64 + 10,
+            };
+            cfg.save(&path)
+                .expect("Concurrent save should succeed without collision");
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().expect("Thread panicked during save");
+    }
+
+    // Verify resulting config file exists and is valid
+    let loaded = Config::load_from_file(&config_path)
+        .expect("Load should succeed")
+        .expect("Config should exist");
+    assert!(loaded.timeout_secs >= 11 && loaded.timeout_secs <= 18);
+
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(&*config_path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+
+    // Verify no temporary files remain in directory
+    let entries: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    for entry in entries {
+        assert!(
+            !entry.starts_with(".config.tmp."),
+            "Found leftover temp file: {}",
+            entry
+        );
+    }
+}
+
+#[test]
+fn test_client_and_server_reject_malformed_config() {
+    use ninerouter_mcp_web::client::NineRouterClient;
+    use ninerouter_mcp_web::server::NineRouterMcpServer;
+
+    let bad_url_cfg = Config {
+        base_url: "https://user:pass@router.com".to_string(),
+        ..Config::default()
+    };
+    assert!(NineRouterClient::new(&bad_url_cfg).is_err());
+    assert!(NineRouterMcpServer::new(&bad_url_cfg).is_err());
+
+    let bad_search_cfg = Config {
+        search_combo: "   ".to_string(),
+        ..Config::default()
+    };
+    assert!(NineRouterMcpServer::new(&bad_search_cfg).is_err());
+
+    let bad_fetch_cfg = Config {
+        fetch_combo: "\t".to_string(),
+        ..Config::default()
+    };
+    assert!(NineRouterMcpServer::new(&bad_fetch_cfg).is_err());
+}

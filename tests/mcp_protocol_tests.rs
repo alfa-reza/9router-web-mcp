@@ -133,3 +133,21 @@ async fn test_mcp_full_flow_with_mock_9router() {
 
     server_handle.abort();
 }
+
+#[test]
+fn test_mcp_server_runtime_error_distinct_from_network_unreachable() {
+    use ninerouter_mcp_web::error::AppError;
+
+    let runtime_err = AppError::ServerRuntime("task panicked".to_string());
+    let msg = runtime_err.to_string();
+    assert!(msg.contains("MCP server runtime error: task panicked"));
+    assert!(!msg.contains("failed to connect to 9Router"));
+    assert!(!msg.contains("Network error"));
+
+    let net_err = AppError::NetworkUnreachable("http://localhost:20128".to_string());
+    let net_msg = net_err.to_string();
+    assert!(
+        net_msg.contains("Network error: failed to connect to 9Router at http://localhost:20128")
+    );
+    assert!(!net_msg.contains("MCP server runtime error"));
+}

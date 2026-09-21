@@ -147,9 +147,9 @@ if [ ! -f "$CONFIG_FILE" ]; then
     if [ "$HAS_TTY" -eq 1 ]; then
         printf "Would you like to configure 9router-mcp-web now? [Y/n] "
         if [ -n "$TTY_IN" ]; then
-            read -r configure_choice <"$TTY_IN"
+            read -r configure_choice <"$TTY_IN" || configure_choice="n"
         else
-            read -r configure_choice
+            read -r configure_choice || configure_choice="n"
         fi
         case "$configure_choice" in
             [nN][oO]|[nN])
@@ -157,9 +157,9 @@ if [ ! -f "$CONFIG_FILE" ]; then
                 ;;
             *)
                 if [ -n "$TTY_IN" ]; then
-                    "${INSTALL_PATH}" configure <"$TTY_IN"
+                    "${INSTALL_PATH}" configure <"$TTY_IN" || echo "Configuration incomplete. You can run '${INSTALL_PATH} configure' at any time."
                 else
-                    "${INSTALL_PATH}" configure
+                    "${INSTALL_PATH}" configure || echo "Configuration incomplete. You can run '${INSTALL_PATH} configure' at any time."
                 fi
                 ;;
         esac

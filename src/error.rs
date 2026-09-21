@@ -33,6 +33,12 @@ pub enum AppError {
     #[error("Authentication failed (401). Verify 9Router API key.")]
     AuthenticationFailed,
 
+    #[error("Access forbidden (403): {0}")]
+    Forbidden(String),
+
+    #[error("MCP server runtime error: {0}")]
+    ServerRuntime(String),
+
     #[error("9Router rate limit exceeded (429): {0}")]
     RateLimited(String),
 

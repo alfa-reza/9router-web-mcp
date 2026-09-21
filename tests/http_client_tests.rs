@@ -154,6 +154,21 @@ async fn test_all_upstream_error_codes() {
 
     let err = client.search(&search_req).await.unwrap_err();
     assert!(matches!(err, AppError::AuthenticationFailed));
+    assert!(err.to_string().contains("401"));
+    assert!(!err.to_string().contains("403"));
+
+    // 2b. 403 Access forbidden (distinct from 401)
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden resource"))
+        .up_to_n_times(1)
+        .mount(&mock_server)
+        .await;
+
+    let err = client.search(&search_req).await.unwrap_err();
+    assert!(matches!(err, AppError::Forbidden(ref msg) if msg.contains("Forbidden resource")));
+    assert!(err.to_string().contains("403"));
+    assert!(!err.to_string().contains("401"));
 
     // 3. 429 Rate limited
     Mock::given(method("POST"))
@@ -319,4 +334,48 @@ async fn test_invalid_json_bounded_preview() {
         }
         other => panic!("Expected InvalidResponseJson, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn test_fetch_endpoint_401_and_403_distinct() {
+    let mock_server = MockServer::start().await;
+
+    let config = Config {
+        base_url: mock_server.uri(),
+        ..Default::default()
+    };
+    let client = NineRouterClient::new(&config).unwrap();
+
+    let fetch_req = FetchRequestBody {
+        model: "fetch-combo",
+        url: "https://example.com/article",
+        format: Some("markdown"),
+        max_characters: Some(1000),
+    };
+
+    // 401 Unauthorized
+    Mock::given(method("POST"))
+        .and(path("/v1/web/fetch"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("API key invalid"))
+        .up_to_n_times(1)
+        .mount(&mock_server)
+        .await;
+
+    let err = client.fetch(&fetch_req).await.unwrap_err();
+    assert!(matches!(err, AppError::AuthenticationFailed));
+    assert!(err.to_string().contains("401"));
+    assert!(!err.to_string().contains("403"));
+
+    // 403 Forbidden
+    Mock::given(method("POST"))
+        .and(path("/v1/web/fetch"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("Account suspended"))
+        .up_to_n_times(1)
+        .mount(&mock_server)
+        .await;
+
+    let err = client.fetch(&fetch_req).await.unwrap_err();
+    assert!(matches!(err, AppError::Forbidden(ref msg) if msg.contains("Account suspended")));
+    assert!(err.to_string().contains("403"));
+    assert!(!err.to_string().contains("401"));
 }
