@@ -41,6 +41,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run tests
         run: cargo test --locked
+      - name: Run installer tests
+        run: sh tests/installer_tests.sh
 
   release-check:
     name: Release Build Check
@@ -57,4 +59,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run shellcheck
-        run: shellcheck install.sh
+        run: shellcheck install.sh tests/installer_tests.sh
+      - name: Run installer tests
+        run: sh tests/installer_tests.sh

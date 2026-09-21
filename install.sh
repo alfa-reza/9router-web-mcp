@@ -132,16 +132,35 @@ CONFIG_FILE="${CONFIG_DIR}/config.toml"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo ""
-    echo "No existing configuration found at ${CONFIG_FILE}."
+    # Detect interactive terminal. When run via `curl ... | sh`, fd 0 is a pipe,
+    # but /dev/tty may be available for interactive user prompting.
+    HAS_TTY=0
+    TTY_IN=""
     if [ -t 0 ]; then
+        HAS_TTY=1
+        TTY_IN=""
+    elif [ -c /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
+        HAS_TTY=1
+        TTY_IN="/dev/tty"
+    fi
+
+    if [ "$HAS_TTY" -eq 1 ]; then
         printf "Would you like to configure 9router-mcp-web now? [Y/n] "
-        read -r configure_choice
+        if [ -n "$TTY_IN" ]; then
+            read -r configure_choice <"$TTY_IN"
+        else
+            read -r configure_choice
+        fi
         case "$configure_choice" in
             [nN][oO]|[nN])
                 echo "Skipping configuration. You can run '${INSTALL_PATH} configure' at any time."
                 ;;
             *)
-                "${INSTALL_PATH}" configure
+                if [ -n "$TTY_IN" ]; then
+                    "${INSTALL_PATH}" configure <"$TTY_IN"
+                else
+                    "${INSTALL_PATH}" configure
+                fi
                 ;;
         esac
     else
