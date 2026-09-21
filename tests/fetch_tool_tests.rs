@@ -74,3 +74,85 @@ async fn test_fetch_tool_invalid_url_error() {
     let result = execute_web_fetch(&client, "fetch-combo", rel_url).await;
     assert_eq!(result.is_error, Some(true));
 }
+
+#[tokio::test]
+async fn test_fetch_tool_default_max_characters() {
+    let mock_server = MockServer::start().await;
+
+    let expected_payload = json!({
+        "model": "fetch-combo",
+        "url": "https://example.com/page",
+        "max_characters": 8000
+    });
+
+    let response_body = json!({
+        "title": "Page",
+        "content": "Page content",
+        "url": "https://example.com/page"
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/v1/web/fetch"))
+        .and(body_json(&expected_payload))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config = Config {
+        base_url: mock_server.uri(),
+        fetch_combo: "fetch-combo".to_string(),
+        ..Default::default()
+    };
+    let client = NineRouterClient::new(&config).unwrap();
+
+    let params = WebFetchParams {
+        url: "https://example.com/page".to_string(),
+        format: None,
+        max_characters: None,
+    };
+
+    let result = execute_web_fetch(&client, &config.fetch_combo, params).await;
+    assert_eq!(result.is_error, Some(false));
+}
+
+#[tokio::test]
+async fn test_fetch_tool_explicit_zero_max_characters() {
+    let mock_server = MockServer::start().await;
+
+    let expected_payload = json!({
+        "model": "fetch-combo",
+        "url": "https://example.com/unlimited",
+        "max_characters": 0
+    });
+
+    let response_body = json!({
+        "title": "Unlimited",
+        "content": "Huge content",
+        "url": "https://example.com/unlimited"
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/v1/web/fetch"))
+        .and(body_json(&expected_payload))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config = Config {
+        base_url: mock_server.uri(),
+        fetch_combo: "fetch-combo".to_string(),
+        ..Default::default()
+    };
+    let client = NineRouterClient::new(&config).unwrap();
+
+    let params = WebFetchParams {
+        url: "https://example.com/unlimited".to_string(),
+        format: None,
+        max_characters: Some(0),
+    };
+
+    let result = execute_web_fetch(&client, &config.fetch_combo, params).await;
+    assert_eq!(result.is_error, Some(false));
+}

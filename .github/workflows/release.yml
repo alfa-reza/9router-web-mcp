@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+
 jobs:
   build-release:
     name: Build (${{ matrix.target }})
@@ -17,7 +20,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             artifact_name: 9router-mcp-web-linux-aarch64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -28,7 +31,7 @@ jobs:
         run: |
           tar -czvf ${{ matrix.artifact_name }}.tar.gz -C target/${{ matrix.target }}/release 9router-mcp-web
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_name }}.tar.gz
@@ -37,9 +40,11 @@ jobs:
     name: Publish GitHub Release
     needs: build-release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Compute Checksums
@@ -48,7 +53,7 @@ jobs:
           find . -name "*.tar.gz" -exec cp {} . \;
           sha256sum *.tar.gz > SHA256SUMS.txt
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             artifacts/*.tar.gz

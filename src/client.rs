@@ -5,10 +5,11 @@ use serde::Serialize;
 use serde_json::Value;
 use std::time::Duration;
 
-use crate::config::Config;
+use crate::config::{validate_and_normalize_base_url, Config};
 use crate::error::{AppError, Result};
 
 pub const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10 MB safety limit
+pub const MAX_ERROR_PREVIEW_BYTES: usize = 1024; // 1 KB error preview cap
 
 #[derive(Clone)]
 pub struct NineRouterClient {
@@ -41,7 +42,7 @@ pub struct SearchRequestBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_filter: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_options: Option<&'a Value>,
+    pub provider_options: Option<&'a serde_json::Map<String, Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +57,8 @@ pub struct FetchRequestBody<'a> {
 
 impl NineRouterClient {
     pub fn new(config: &Config) -> Result<Self> {
+        let base_url = validate_and_normalize_base_url(&config.base_url)?;
+
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -96,7 +99,7 @@ impl NineRouterClient {
 
         Ok(Self {
             client,
-            base_url: config.base_url.clone(),
+            base_url,
             api_key: config.api_key.clone(),
             timeout_secs: config.timeout_secs,
         })
@@ -133,7 +136,10 @@ impl NineRouterClient {
         // Check Content-Length header for early rejection if oversized
         if let Some(content_length) = response.content_length() {
             if content_length > MAX_RESPONSE_BYTES as u64 {
-                return Err(AppError::ResponseTooLarge(content_length as usize));
+                return Err(AppError::ResponseTooLarge {
+                    limit: MAX_RESPONSE_BYTES,
+                    observed: Some(content_length as usize),
+                });
             }
         }
 
@@ -149,20 +155,22 @@ impl NineRouterClient {
             }
         })? {
             if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
-                return Err(AppError::ResponseTooLarge(bytes.len() + chunk.len()));
+                return Err(AppError::ResponseTooLarge {
+                    limit: MAX_RESPONSE_BYTES,
+                    observed: Some(bytes.len() + chunk.len()),
+                });
             }
             bytes.extend_from_slice(&chunk);
         }
 
-        let body_str = String::from_utf8_lossy(&bytes).to_string();
-
         if !status.is_success() {
-            let error_msg = extract_error_message(&body_str, status.as_u16());
+            let error_msg = extract_error_message(&bytes, status.as_u16());
             let code = status.as_u16();
 
             return Err(match code {
                 400 => AppError::BadRequest(error_msg),
-                401 | 403 => AppError::AuthenticationFailed,
+                401 => AppError::AuthenticationFailed,
+                403 => AppError::Forbidden(error_msg),
                 429 => AppError::RateLimited(error_msg),
                 503 => AppError::ServiceUnavailable(error_msg),
                 _ => AppError::UpstreamServerError {
@@ -172,8 +180,10 @@ impl NineRouterClient {
             });
         }
 
-        serde_json::from_slice::<Value>(&bytes)
-            .map_err(|e| AppError::InvalidResponseJson(format!("{}: {}", e, body_str)))
+        serde_json::from_slice::<Value>(&bytes).map_err(|e| {
+            let preview = format_error_preview(&bytes);
+            AppError::InvalidResponseJson(format!("{}: {}", e, preview))
+        })
     }
 
     /// Execute search through 9Router POST /v1/search
@@ -187,24 +197,52 @@ impl NineRouterClient {
     }
 }
 
-fn extract_error_message(body: &str, status: u16) -> String {
-    if body.trim().is_empty() {
+fn truncate_preview(s: &str) -> String {
+    if s.len() <= MAX_ERROR_PREVIEW_BYTES {
+        s.to_string()
+    } else {
+        let mut boundary = MAX_ERROR_PREVIEW_BYTES;
+        while !s.is_char_boundary(boundary) && boundary > 0 {
+            boundary -= 1;
+        }
+        format!("{}... [truncated]", &s[..boundary])
+    }
+}
+
+fn format_error_preview(bytes: &[u8]) -> String {
+    let capped_len = bytes.len().min(MAX_ERROR_PREVIEW_BYTES);
+    let s = String::from_utf8_lossy(&bytes[..capped_len]);
+    if bytes.len() > MAX_ERROR_PREVIEW_BYTES {
+        format!("{}... [truncated]", s)
+    } else {
+        s.to_string()
+    }
+}
+
+fn extract_error_message(bytes: &[u8], status: u16) -> String {
+    if bytes.is_empty() {
         return format!("HTTP {}", status);
     }
 
-    if let Ok(parsed) = serde_json::from_str::<Value>(body) {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(bytes) {
         if let Some(err_obj) = parsed.get("error") {
             if let Some(msg) = err_obj.get("message").and_then(|m| m.as_str()) {
-                return msg.to_string();
+                return truncate_preview(msg);
             }
             if let Some(err_str) = err_obj.as_str() {
-                return err_str.to_string();
+                return truncate_preview(err_str);
             }
         }
         if let Some(msg) = parsed.get("message").and_then(|m| m.as_str()) {
-            return msg.to_string();
+            return truncate_preview(msg);
         }
     }
 
-    body.to_string()
+    let preview = format_error_preview(bytes);
+    let trimmed = preview.trim();
+    if trimmed.is_empty() {
+        format!("HTTP {}", status)
+    } else {
+        trimmed.to_string()
+    }
 }

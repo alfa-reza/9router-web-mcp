@@ -46,7 +46,7 @@ pub struct WebSearchParams {
     pub domain_filter: Option<String>,
 
     /// Optional pass-through JSON object for provider-specific parameters.
-    pub provider_options: Option<serde_json::Value>,
+    pub provider_options: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 pub fn tool_success(value: serde_json::Value) -> CallToolResult {

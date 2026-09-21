@@ -19,11 +19,23 @@ pub struct NineRouterMcpServer {
 
 impl NineRouterMcpServer {
     pub fn new(config: &Config) -> std::result::Result<Self, AppError> {
+        let search_combo = config.search_combo.trim().to_string();
+        if search_combo.is_empty() {
+            return Err(AppError::Config(
+                "search_combo cannot be empty or whitespace-only".to_string(),
+            ));
+        }
+        let fetch_combo = config.fetch_combo.trim().to_string();
+        if fetch_combo.is_empty() {
+            return Err(AppError::Config(
+                "fetch_combo cannot be empty or whitespace-only".to_string(),
+            ));
+        }
         let client = NineRouterClient::new(config)?;
         Ok(Self {
             client: Arc::new(client),
-            search_combo: config.search_combo.clone(),
-            fetch_combo: config.fetch_combo.clone(),
+            search_combo,
+            fetch_combo,
         })
     }
 
@@ -65,5 +77,5 @@ impl NineRouterMcpServer {
     }
 }
 
-#[tool_handler(name = "9router-mcp-web", version = "0.1.0")]
+#[tool_handler(name = "9router-mcp-web")]
 impl ServerHandler for NineRouterMcpServer {}

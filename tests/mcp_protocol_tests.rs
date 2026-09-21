@@ -16,6 +16,7 @@ async fn test_server_handler_list_tools_exact_two() {
 
     let server_info = server.get_info();
     assert_eq!(server_info.server_info.name, "9router-mcp-web");
+    assert_eq!(server_info.server_info.version, env!("CARGO_PKG_VERSION"));
 
     // In-memory duplex connection
     let (client_io, server_io) = tokio::io::duplex(8192);
@@ -131,4 +132,22 @@ async fn test_mcp_full_flow_with_mock_9router() {
     assert!(!search_res.content.is_empty());
 
     server_handle.abort();
+}
+
+#[test]
+fn test_mcp_server_runtime_error_distinct_from_network_unreachable() {
+    use ninerouter_mcp_web::error::AppError;
+
+    let runtime_err = AppError::ServerRuntime("task panicked".to_string());
+    let msg = runtime_err.to_string();
+    assert!(msg.contains("MCP server runtime error: task panicked"));
+    assert!(!msg.contains("failed to connect to 9Router"));
+    assert!(!msg.contains("Network error"));
+
+    let net_err = AppError::NetworkUnreachable("http://localhost:20128".to_string());
+    let net_msg = net_err.to_string();
+    assert!(
+        net_msg.contains("Network error: failed to connect to 9Router at http://localhost:20128")
+    );
+    assert!(!net_msg.contains("MCP server runtime error"));
 }

@@ -1,20 +1,6 @@
-use ninerouter_mcp_web::config::{self, Config};
+use ninerouter_mcp_web::config::{self, parse_config_arg, Config};
 use ninerouter_mcp_web::error::{AppError, Result};
 use ninerouter_mcp_web::server::NineRouterMcpServer;
-use std::path::PathBuf;
-
-fn parse_config_arg(args: &[String]) -> Option<PathBuf> {
-    for i in 0..args.len() {
-        if args[i] == "--config" || args[i] == "-c" {
-            if i + 1 < args.len() {
-                return Some(PathBuf::from(&args[i + 1]));
-            }
-        } else if let Some(stripped) = args[i].strip_prefix("--config=") {
-            return Some(PathBuf::from(stripped));
-        }
-    }
-    None
-}
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
@@ -28,7 +14,7 @@ async fn main() -> Result<()> {
         .init();
 
     let args: Vec<String> = std::env::args().collect();
-    let config_path_override = parse_config_arg(&args);
+    let config_path_override = parse_config_arg(&args)?;
 
     if args.len() > 1 && args[1] == "configure" {
         return config::run_interactive_configure(config_path_override.as_deref());
@@ -74,9 +60,28 @@ async fn main() -> Result<()> {
 
     let running = rmcp::service::serve_server(server, (stdin, stdout))
         .await
-        .map_err(|e| AppError::Config(format!("Failed to start MCP server: {}", e)))?;
+        .map_err(|e| AppError::ServerRuntime(format!("Failed to start MCP server: {}", e)))?;
 
-    let _ = running.waiting().await;
+    match running.waiting().await {
+        Ok(rmcp::service::QuitReason::Cancelled | rmcp::service::QuitReason::Closed) => {
+            tracing::info!("MCP server stopped gracefully");
+        }
+        Ok(rmcp::service::QuitReason::JoinError(e)) => {
+            return Err(AppError::ServerRuntime(format!(
+                "MCP server runtime task panicked or failed: {}",
+                e
+            )));
+        }
+        Ok(_) => {
+            tracing::info!("MCP server stopped");
+        }
+        Err(e) => {
+            return Err(AppError::ServerRuntime(format!(
+                "MCP service task join failed: {}",
+                e
+            )));
+        }
+    }
 
     Ok(())
 }
