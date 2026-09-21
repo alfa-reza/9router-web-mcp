@@ -65,5 +65,5 @@ impl NineRouterMcpServer {
     }
 }
 
-#[tool_handler(name = "9router-mcp-web", version = "0.1.0")]
+#[tool_handler(name = "9router-mcp-web")]
 impl ServerHandler for NineRouterMcpServer {}

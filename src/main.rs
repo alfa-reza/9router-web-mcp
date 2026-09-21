@@ -62,7 +62,26 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| AppError::Config(format!("Failed to start MCP server: {}", e)))?;
 
-    let _ = running.waiting().await;
+    match running.waiting().await {
+        Ok(rmcp::service::QuitReason::Cancelled | rmcp::service::QuitReason::Closed) => {
+            tracing::info!("MCP server stopped gracefully");
+        }
+        Ok(rmcp::service::QuitReason::JoinError(e)) => {
+            return Err(AppError::NetworkUnreachable(format!(
+                "MCP server runtime task panicked or failed: {}",
+                e
+            )));
+        }
+        Ok(_) => {
+            tracing::info!("MCP server stopped");
+        }
+        Err(e) => {
+            return Err(AppError::NetworkUnreachable(format!(
+                "MCP service task join failed: {}",
+                e
+            )));
+        }
+    }
 
     Ok(())
 }

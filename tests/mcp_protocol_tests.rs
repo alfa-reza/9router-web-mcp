@@ -16,6 +16,7 @@ async fn test_server_handler_list_tools_exact_two() {
 
     let server_info = server.get_info();
     assert_eq!(server_info.server_info.name, "9router-mcp-web");
+    assert_eq!(server_info.server_info.version, env!("CARGO_PKG_VERSION"));
 
     // In-memory duplex connection
     let (client_io, server_io) = tokio::io::duplex(8192);
