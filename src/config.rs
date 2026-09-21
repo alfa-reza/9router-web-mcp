@@ -132,14 +132,6 @@ pub fn validate_and_normalize_base_url(url: &str) -> Result<String> {
     Ok(result)
 }
 
-/// Normalizes a base URL string, falling back to trimmed stripped-slash if parsing fails.
-pub fn normalize_base_url(url: &str) -> String {
-    validate_and_normalize_base_url(url).unwrap_or_else(|_| {
-        let trimmed = url.trim();
-        trimmed.trim_end_matches('/').to_string()
-    })
-}
-
 impl Config {
     /// Return the standard default configuration file path:
     /// $XDG_CONFIG_HOME/9router-mcp-web/config.toml or ~/.config/9router-mcp-web/config.toml

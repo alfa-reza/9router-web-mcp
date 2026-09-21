@@ -1,6 +1,6 @@
 use ninerouter_mcp_web::config::{
-    normalize_base_url, parse_config_arg, validate_and_normalize_base_url, Config,
-    DEFAULT_BASE_URL, DEFAULT_FETCH_COMBO, DEFAULT_SEARCH_COMBO, DEFAULT_TIMEOUT_SECS,
+    parse_config_arg, validate_and_normalize_base_url, Config, DEFAULT_BASE_URL,
+    DEFAULT_FETCH_COMBO, DEFAULT_SEARCH_COMBO, DEFAULT_TIMEOUT_SECS,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -15,26 +15,6 @@ fn test_default_config() {
     assert_eq!(cfg.search_combo, DEFAULT_SEARCH_COMBO);
     assert_eq!(cfg.fetch_combo, DEFAULT_FETCH_COMBO);
     assert_eq!(cfg.timeout_secs, DEFAULT_TIMEOUT_SECS);
-}
-
-#[test]
-fn test_normalize_base_url() {
-    assert_eq!(
-        normalize_base_url("http://localhost:20128/"),
-        "http://localhost:20128"
-    );
-    assert_eq!(
-        normalize_base_url("http://localhost:20128///"),
-        "http://localhost:20128"
-    );
-    assert_eq!(
-        normalize_base_url("https://example.com/api/v1/"),
-        "https://example.com/api/v1"
-    );
-    assert_eq!(
-        normalize_base_url("https://example.com/api/v1"),
-        "https://example.com/api/v1"
-    );
 }
 
 #[test]
@@ -217,6 +197,10 @@ fn test_validate_and_normalize_base_url_detailed() {
     assert_eq!(
         validate_and_normalize_base_url("https://api.example.com/v1///").unwrap(),
         "https://api.example.com/v1"
+    );
+    assert_eq!(
+        validate_and_normalize_base_url("https://example.com/api/v1").unwrap(),
+        "https://example.com/api/v1"
     );
 
     // Invalid scheme
