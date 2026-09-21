@@ -195,3 +195,128 @@ async fn test_all_upstream_error_codes() {
         AppError::UpstreamServerError { status: 500, .. }
     ));
 }
+
+#[tokio::test]
+async fn test_response_too_large_content_length() {
+    let mock_server = MockServer::start().await;
+
+    let config = Config {
+        base_url: mock_server.uri(),
+        ..Default::default()
+    };
+    let client = NineRouterClient::new(&config).unwrap();
+
+    let oversized_bytes = 10 * 1024 * 1024 + 1; // 10MB + 1
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; oversized_bytes]))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let req = SearchRequestBody {
+        model: "search-combo",
+        query: "test",
+        max_results: None,
+        search_type: None,
+        country: None,
+        language: None,
+        time_range: None,
+        domain_filter: None,
+        provider_options: None,
+    };
+
+    let err = client.search(&req).await.unwrap_err();
+    match &err {
+        AppError::ResponseTooLarge { limit, observed } => {
+            assert_eq!(*limit, 10 * 1024 * 1024);
+            assert_eq!(*observed, Some(oversized_bytes));
+        }
+        other => panic!("Expected ResponseTooLarge, got {:?}", other),
+    }
+    assert!(err.to_string().contains("observed 10485761 bytes"));
+}
+
+#[tokio::test]
+async fn test_error_message_bounded_preview() {
+    let mock_server = MockServer::start().await;
+
+    let config = Config {
+        base_url: mock_server.uri(),
+        ..Default::default()
+    };
+    let client = NineRouterClient::new(&config).unwrap();
+
+    let huge_error = "A".repeat(50_000);
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(500).set_body_string(&huge_error))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let req = SearchRequestBody {
+        model: "search-combo",
+        query: "test",
+        max_results: None,
+        search_type: None,
+        country: None,
+        language: None,
+        time_range: None,
+        domain_filter: None,
+        provider_options: None,
+    };
+
+    let err = client.search(&req).await.unwrap_err();
+    match err {
+        AppError::UpstreamServerError { status, message } => {
+            assert_eq!(status, 500);
+            assert!(message.contains("... [truncated]"));
+            assert!(message.len() < 2000);
+        }
+        other => panic!("Expected UpstreamServerError, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_invalid_json_bounded_preview() {
+    let mock_server = MockServer::start().await;
+
+    let config = Config {
+        base_url: mock_server.uri(),
+        ..Default::default()
+    };
+    let client = NineRouterClient::new(&config).unwrap();
+
+    let huge_invalid_json = "NOT_JSON ".repeat(5_000);
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(&huge_invalid_json))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let req = SearchRequestBody {
+        model: "search-combo",
+        query: "test",
+        max_results: None,
+        search_type: None,
+        country: None,
+        language: None,
+        time_range: None,
+        domain_filter: None,
+        provider_options: None,
+    };
+
+    let err = client.search(&req).await.unwrap_err();
+    match err {
+        AppError::InvalidResponseJson(msg) => {
+            assert!(msg.contains("... [truncated]"));
+            assert!(msg.len() < 2000);
+        }
+        other => panic!("Expected InvalidResponseJson, got {:?}", other),
+    }
+}

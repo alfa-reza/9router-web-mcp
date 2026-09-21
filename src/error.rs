@@ -1,5 +1,15 @@
 use thiserror::Error;
 
+fn format_response_too_large(limit: usize, observed: Option<usize>) -> String {
+    match observed {
+        Some(bytes) => format!(
+            "Upstream response exceeded safe limit of {} bytes (observed {} bytes)",
+            limit, bytes
+        ),
+        None => format!("Upstream response exceeded safe limit of {} bytes", limit),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("Configuration error: {0}")]
@@ -35,8 +45,11 @@ pub enum AppError {
     #[error("Failed to decode 9Router JSON response: {0}")]
     InvalidResponseJson(String),
 
-    #[error("Upstream response exceeded safe limit of {0} bytes")]
-    ResponseTooLarge(usize),
+    #[error("{}", format_response_too_large(*limit, *observed))]
+    ResponseTooLarge {
+        limit: usize,
+        observed: Option<usize>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
