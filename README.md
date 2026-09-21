@@ -1,12 +1,13 @@
 # 9router-mcp-web
 
 [![CI](https://github.com/alfa-reza/9router-web-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alfa-reza/9router-web-mcp/actions/workflows/ci.yml)
-[![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Release](https://img.shields.io/github/v/release/alfa-reza/9router-web-mcp?display_name=tag&sort=semver)](https://github.com/alfa-reza/9router-web-mcp/releases/latest)
+[![Rust](https://img.shields.io/badge/built%20with-Rust-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/github/license/alfa-reza/9router-web-mcp)](LICENSE)
 
-A lightweight [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that exposes **Web Search** and **Web Fetch** through [9Router](https://github.com/decolua/9router).
+A lightweight [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server written in Rust that exposes **Web Search** and **Web Fetch** through [9Router](https://github.com/decolua/9router).
 
-Written in Rust and designed as a thin STDIO adapter: provider credentials, routing, combos, and fallback behavior stay in 9Router.
+`9router-mcp-web` is a thin STDIO adapter. Provider credentials, routing, combos, and fallback behavior stay in 9Router.
 
 ## Features
 
@@ -43,6 +44,8 @@ http://localhost:20128
 http://localhost:20128/v1
 ```
 
+Prebuilt binaries and checksums are available on the [Releases](https://github.com/alfa-reza/9router-web-mcp/releases) page.
+
 ## Add to an MCP client
 
 ### Claude Code
@@ -72,13 +75,13 @@ For MCP clients that use the `mcpServers` configuration shape:
 }
 ```
 
-If 9Router is remote, configure it first with:
+For a remote 9Router deployment, configure the connection first:
 
 ```sh
 9router-mcp-web configure
 ```
 
-or pass supported `NINEROUTER_*` environment variables from your MCP client.
+or pass the supported `NINEROUTER_*` environment variables from your MCP client.
 
 ## Tools
 
@@ -87,13 +90,13 @@ or pass supported `NINEROUTER_*` environment variables from your MCP client.
 | `web_search` | Search the web through the configured 9Router search combo. |
 | `web_fetch` | Fetch and extract content from a URL through the configured 9Router fetch combo. |
 
-9Router remains responsible for provider selection, credentials, fallback, and combo behavior.
+9Router remains responsible for provider selection, credentials, routing, combos, and fallback behavior.
 
 ## Requirements
 
 - Linux `x86_64` or `aarch64`
 - A reachable [9Router](https://github.com/decolua/9router) instance
-- Search/fetch combos configured in 9Router
+- Search and fetch combos configured in 9Router
 
 ## Build from source
 
