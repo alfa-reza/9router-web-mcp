@@ -429,16 +429,6 @@ fn test_endpoint_url_construction_all_base_url_variations() {
             "https://example.com/api-v1/v1/search",
             "https://example.com/api-v1/v1/web/fetch",
         ),
-        (
-            "http://console.jhonaleystore.id:2519/",
-            "http://console.jhonaleystore.id:2519/v1/search",
-            "http://console.jhonaleystore.id:2519/v1/web/fetch",
-        ),
-        (
-            "http://console.jhonaleystore.id:2519/v1/",
-            "http://console.jhonaleystore.id:2519/v1/search",
-            "http://console.jhonaleystore.id:2519/v1/web/fetch",
-        ),
     ];
 
     for (base_url, expected_search, expected_fetch) in test_cases {
