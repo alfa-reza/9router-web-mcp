@@ -136,6 +136,28 @@ async fn test_server_handler_list_tools_exact_two() {
     assert!(!opt_props.contains_key("baseUrl"));
     assert_eq!(opt_props.len(), 4);
 
+    // Verify web_search schema describes domain_filter as an array of strings
+    let domain_filter_schema = &search_schema_val["properties"]["domain_filter"];
+    assert!(
+        domain_filter_schema["type"] == "array"
+            || domain_filter_schema["type"] == json!(["array", "null"])
+            || domain_filter_schema.get("anyOf").is_some(),
+        "MCP schema must describe domain_filter as array"
+    );
+    let items = domain_filter_schema
+        .get("items")
+        .or_else(|| {
+            domain_filter_schema
+                .get("anyOf")
+                .and_then(|arr| arr.as_array())
+                .and_then(|subschemas| subschemas.iter().find_map(|s| s.get("items")))
+        })
+        .expect("domain_filter schema must define items");
+    assert_eq!(
+        items["type"], "string",
+        "domain_filter items must be string"
+    );
+
     // Call web_search tool through client
     let args = json!({ "query": "test query" })
         .as_object()

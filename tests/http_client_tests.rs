@@ -1,5 +1,4 @@
 use serde_json::json;
-use wiremock::matchers::{body_json, header, method, path};
 use url::Url;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

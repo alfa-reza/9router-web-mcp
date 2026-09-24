@@ -553,7 +553,7 @@ async fn test_unrelated_search_behavior_unchanged() {
         "country": "US",
         "language": "en",
         "time_range": "week",
-        "domain_filter": "github.com"
+        "domain_filter": ["github.com"]
     });
 
     let response_body = json!({
@@ -585,7 +585,7 @@ async fn test_unrelated_search_behavior_unchanged() {
         country: Some("US".to_string()),
         language: Some("en".to_string()),
         time_range: Some("week".to_string()),
-        domain_filter: Some("github.com".to_string()),
+        domain_filter: Some(vec!["github.com".to_string()]),
         provider_options: None,
     };
 
