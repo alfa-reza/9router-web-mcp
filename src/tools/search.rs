@@ -43,8 +43,8 @@ pub struct WebSearchParams {
     /// Time range for results (e.g. 'day', 'week', 'month', 'year').
     pub time_range: Option<String>,
 
-    /// Specific domain to restrict search to (e.g. 'github.com').
-    pub domain_filter: Option<String>,
+    /// Domains to include or exclude (prefixed with '-') from search (e.g. ["github.com", "-reddit.com"]).
+    pub domain_filter: Option<Vec<String>>,
 
     /// Optional pass-through parameters for backend search providers (`cx`, `depth`, `cursor`, `queryType`).
     pub provider_options: Option<SearchProviderOptions>,
