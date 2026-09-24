@@ -1,7 +1,8 @@
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::redirect::Policy;
 use reqwest::Client;
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 use url::Url;
@@ -26,6 +27,31 @@ impl NineRouterClient {
     }
 }
 
+/// Provider-specific search options supported by 9Router.
+///
+/// Only documented and intentionally supported per-request option fields are accepted.
+/// Arbitrary keys and endpoint overrides such as `baseUrl` are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+#[schemars(inline)]
+pub struct SearchProviderOptions {
+    /// Google Custom Search Engine ID (required for google-pse).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cx: Option<String>,
+
+    /// Search depth for providers supporting it (e.g. 'fast', 'standard', 'deep' for Linkup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<String>,
+
+    /// Pagination cursor for continuing search (e.g. for Xquik).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+
+    /// Query type for providers supporting it (e.g. 'Latest', 'Top' for Xquik).
+    #[serde(default, rename = "queryType", skip_serializing_if = "Option::is_none")]
+    pub query_type: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SearchRequestBody<'a> {
     pub model: &'a str,
@@ -43,7 +69,7 @@ pub struct SearchRequestBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_filter: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_options: Option<&'a serde_json::Map<String, Value>>,
+    pub provider_options: Option<&'a SearchProviderOptions>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,6 +80,37 @@ pub struct FetchRequestBody<'a> {
     pub format: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_characters: Option<u64>,
+}
+
+/// Check if two URLs have the same origin (scheme, host, and effective port).
+pub fn is_same_origin(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host().is_some()
+        && a.host() == b.host()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// Evaluates whether a redirect from previous URLs to the target URL should be followed.
+///
+/// Invariant: A credential-bearing request must not follow a redirect to a different origin.
+/// Returns true if all previous hops share the exact same origin (scheme, host, effective port)
+/// as the target URL, and redirect depth is within the hop limit (< 10).
+pub fn should_follow_redirect(previous: &[Url], next: &Url) -> bool {
+    if previous.is_empty() || previous.len() >= 10 {
+        return false;
+    }
+    previous.iter().all(|prev| is_same_origin(prev, next))
+}
+
+/// Custom redirect policy enforcing the same-origin invariant across redirect hops.
+pub fn same_origin_redirect_policy() -> Policy {
+    Policy::custom(|attempt| {
+        if should_follow_redirect(attempt.previous(), attempt.url()) {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
 }
 
 impl NineRouterClient {
@@ -74,25 +131,10 @@ impl NineRouterClient {
             }
         }
 
-        // Custom redirect policy: do NOT forward Authorization to different hosts (R-UP-05, S-10)
-        let redirect_policy = Policy::custom(|attempt| {
-            if attempt
-                .previous()
-                .iter()
-                .any(|prev| prev.host() != attempt.url().host())
-            {
-                // Prevent following redirects to different host when credentials are involved
-                attempt.stop()
-            } else if attempt.previous().len() >= 10 {
-                attempt.stop()
-            } else {
-                attempt.follow()
-            }
-        });
-
+        // Custom redirect policy: do NOT follow redirects across origin boundaries (scheme, host, effective port)
         let client = Client::builder()
             .default_headers(headers)
-            .redirect(redirect_policy)
+            .redirect(same_origin_redirect_policy())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()
@@ -242,7 +284,7 @@ impl NineRouterClient {
     }
 }
 
-fn truncate_preview(s: &str) -> String {
+pub(crate) fn truncate_preview(s: &str) -> String {
     if s.len() <= MAX_ERROR_PREVIEW_BYTES {
         s.to_string()
     } else {
@@ -254,14 +296,13 @@ fn truncate_preview(s: &str) -> String {
     }
 }
 
-fn format_error_preview(bytes: &[u8]) -> String {
-    let capped_len = bytes.len().min(MAX_ERROR_PREVIEW_BYTES);
-    let s = String::from_utf8_lossy(&bytes[..capped_len]);
-    if bytes.len() > MAX_ERROR_PREVIEW_BYTES {
-        format!("{}... [truncated]", s)
+pub(crate) fn format_error_preview(bytes: &[u8]) -> String {
+    let capped = if bytes.len() > MAX_ERROR_PREVIEW_BYTES + 4 {
+        &bytes[..MAX_ERROR_PREVIEW_BYTES + 4]
     } else {
-        s.to_string()
-    }
+        bytes
+    };
+    truncate_preview(&String::from_utf8_lossy(capped))
 }
 
 fn extract_error_message(bytes: &[u8], status: u16) -> String {
@@ -289,5 +330,68 @@ fn extract_error_message(bytes: &[u8], status: u16) -> String {
         format!("HTTP {}", status)
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_preview_ascii_within_limit() {
+        let input = "a".repeat(1024);
+        assert_eq!(truncate_preview(&input), input);
+    }
+
+    #[test]
+    fn test_truncate_preview_ascii_exceeds_limit() {
+        let input = "a".repeat(1025);
+        let res = truncate_preview(&input);
+        assert_eq!(res, format!("{}... [truncated]", "a".repeat(1024)));
+    }
+
+    #[test]
+    fn test_truncate_preview_multibyte_crossing_boundary() {
+        // 1023 ASCII + 4-byte char + more
+        let input = format!("{}🦀extra", "a".repeat(1023));
+        let res = truncate_preview(&input);
+        assert_eq!(res, format!("{}... [truncated]", "a".repeat(1023)));
+        assert!(!res.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_format_error_preview_multibyte_crossing_boundary() {
+        // 1023 ASCII + 4-byte crab emoji + trailing bytes
+        let mut bytes = "a".repeat(1023).into_bytes();
+        bytes.extend_from_slice("🦀".as_bytes());
+        bytes.extend_from_slice(b"trailing bytes");
+
+        let res = format_error_preview(&bytes);
+        assert_eq!(res, format!("{}... [truncated]", "a".repeat(1023)));
+        assert!(!res.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_format_error_preview_multibyte_ending_at_limit() {
+        // 1020 ASCII + 4-byte crab emoji (ends exactly at 1024) + trailing bytes
+        let mut bytes = "a".repeat(1020).into_bytes();
+        bytes.extend_from_slice("🦀".as_bytes());
+        bytes.extend_from_slice(b"trailing bytes");
+
+        let res = format_error_preview(&bytes);
+        assert_eq!(res, format!("{}🦀... [truncated]", "a".repeat(1020)));
+        assert!(!res.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_format_error_preview_3byte_char_crossing_boundary() {
+        // '€' is 3 bytes (0xE2, 0x82, 0xAC) at 1023..1026
+        let mut bytes = "a".repeat(1023).into_bytes();
+        bytes.extend_from_slice("€".as_bytes());
+        bytes.extend_from_slice(b"more");
+
+        let res = format_error_preview(&bytes);
+        assert_eq!(res, format!("{}... [truncated]", "a".repeat(1023)));
+        assert!(!res.contains('\u{FFFD}'));
     }
 }

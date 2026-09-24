@@ -2,6 +2,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub use crate::client::SearchProviderOptions;
 use crate::client::{NineRouterClient, SearchRequestBody};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -45,12 +46,12 @@ pub struct WebSearchParams {
     /// Domains to include or exclude (prefixed with '-') from search (e.g. ["github.com", "-reddit.com"]).
     pub domain_filter: Option<Vec<String>>,
 
-    /// Optional pass-through JSON object for provider-specific parameters.
-    pub provider_options: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Optional pass-through parameters for backend search providers (`cx`, `depth`, `cursor`, `queryType`).
+    pub provider_options: Option<SearchProviderOptions>,
 }
 
 pub fn tool_success(value: serde_json::Value) -> CallToolResult {
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    let text = serde_json::to_string(&value).unwrap_or_else(|_| value.to_string());
     let mut res = CallToolResult::structured(value);
     res.content = vec![ContentBlock::text(text)];
     res
