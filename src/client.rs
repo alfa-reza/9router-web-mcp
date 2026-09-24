@@ -41,7 +41,7 @@ pub struct SearchRequestBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_range: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub domain_filter: Option<&'a str>,
+    pub domain_filter: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_options: Option<&'a serde_json::Map<String, Value>>,
 }

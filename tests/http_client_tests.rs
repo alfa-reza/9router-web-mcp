@@ -1,5 +1,5 @@
 use serde_json::json;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use ninerouter_mcp_web::client::{FetchRequestBody, NineRouterClient, SearchRequestBody};
@@ -533,4 +533,74 @@ async fn test_client_observable_requests_with_and_without_v1_base_url() {
     let client3 = NineRouterClient::new(&cfg3).unwrap();
     assert!(client3.search(&search_req).await.is_ok());
     assert!(client3.fetch(&fetch_req).await.is_ok());
+}
+
+#[tokio::test]
+async fn test_search_request_domain_filter_serialization() {
+    let mock_server = MockServer::start().await;
+
+    // 1. With domain_filter containing inclusions and exclusions:
+    // Serialized as an array of strings, not a scalar. Preserves ["github.com", "-example.com"] exactly.
+    // Unrelated search fields (e.g. search_type = "x") preserved.
+    let expected_payload = json!({
+        "model": "test-search-combo",
+        "query": "rust programming",
+        "search_type": "x",
+        "domain_filter": ["github.com", "-example.com"]
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .and(body_json(&expected_payload))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "results": [] })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config = Config {
+        base_url: mock_server.uri(),
+        search_combo: "test-search-combo".to_string(),
+        ..Default::default()
+    };
+    let client = NineRouterClient::new(&config).unwrap();
+
+    let domains = vec!["github.com".to_string(), "-example.com".to_string()];
+    let req = SearchRequestBody {
+        model: &config.search_combo,
+        query: "rust programming",
+        max_results: None,
+        search_type: Some("x"),
+        country: None,
+        language: None,
+        time_range: None,
+        domain_filter: Some(&domains),
+        provider_options: None,
+    };
+
+    client.search(&req).await.expect("Search must succeed");
+
+    // Also assert direct serde_json serialization of SearchRequestBody
+    let serialized = serde_json::to_value(&req).unwrap();
+    assert_eq!(
+        serialized["domain_filter"],
+        json!(["github.com", "-example.com"])
+    );
+    assert!(serialized["domain_filter"].is_array());
+    assert!(!serialized["domain_filter"].is_string());
+
+    // 2. Absence of domain_filter keeps existing optional-field behavior (omitted from serialized JSON)
+    let req_absent = SearchRequestBody {
+        model: &config.search_combo,
+        query: "rust programming",
+        max_results: None,
+        search_type: Some("web"),
+        country: None,
+        language: None,
+        time_range: None,
+        domain_filter: None,
+        provider_options: None,
+    };
+
+    let serialized_absent = serde_json::to_value(&req_absent).unwrap();
+    assert!(serialized_absent.get("domain_filter").is_none());
 }

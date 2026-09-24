@@ -1,5 +1,5 @@
 use serde_json::json;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use rmcp::handler::server::ServerHandler;
@@ -64,6 +64,30 @@ async fn test_server_handler_list_tools_exact_two() {
         );
     }
 
+    // Verify web_search schema describes domain_filter as an array of strings
+    let search_tool = tools.tools.iter().find(|t| t.name == "web_search").unwrap();
+    let schema_val = serde_json::to_value(&search_tool.input_schema).unwrap();
+    let domain_filter_schema = &schema_val["properties"]["domain_filter"];
+    assert!(
+        domain_filter_schema["type"] == "array"
+            || domain_filter_schema["type"] == json!(["array", "null"])
+            || domain_filter_schema.get("anyOf").is_some(),
+        "MCP schema must describe domain_filter as array"
+    );
+    let items = domain_filter_schema
+        .get("items")
+        .or_else(|| {
+            domain_filter_schema
+                .get("anyOf")
+                .and_then(|arr| arr.as_array())
+                .and_then(|subschemas| subschemas.iter().find_map(|s| s.get("items")))
+        })
+        .expect("domain_filter schema must define items");
+    assert_eq!(
+        items["type"], "string",
+        "domain_filter items must be string"
+    );
+
     // Call web_search tool through client
     let args = json!({ "query": "test query" })
         .as_object()
@@ -121,6 +145,73 @@ async fn test_mcp_full_flow_with_mock_9router() {
         .as_object()
         .unwrap()
         .clone();
+    let search_res = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("web_search").with_arguments(args))
+        .await
+        .expect("Search call failed");
+
+    assert_eq!(search_res.is_error, Some(false));
+    assert!(search_res.structured_content.is_some());
+    assert!(!search_res.content.is_empty());
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_mcp_full_flow_with_domain_filter_and_search_type() {
+    let mock_server = MockServer::start().await;
+
+    // Upstream 9Router must receive the domain_filter array preserving inclusions and exclusions,
+    // and unrelated fields like search_type = "x" must not be regressed.
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .and(body_json(json!({
+            "model": "search-combo",
+            "query": "find wiremock",
+            "search_type": "x",
+            "domain_filter": ["github.com", "-reddit.com"]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "title": "WireMock Test", "url": "https://wiremock.org" }
+            ]
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config = Config {
+        base_url: mock_server.uri(),
+        search_combo: "search-combo".to_string(),
+        fetch_combo: "fetch-combo".to_string(),
+        ..Default::default()
+    };
+
+    let server = NineRouterMcpServer::new(&config).unwrap();
+
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let (server_read, server_write) = tokio::io::split(server_io);
+
+    let server_handle = tokio::spawn(async move {
+        let running = rmcp::service::serve_server(server, (server_read, server_write))
+            .await
+            .expect("Server init failed");
+        let _ = running.waiting().await;
+    });
+
+    let client = ().serve((client_read, client_write)).await.expect("Client init failed");
+
+    let args = json!({
+        "query": "find wiremock",
+        "search_type": "x",
+        "domain_filter": ["github.com", "-reddit.com"]
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+
     let search_res = client
         .peer()
         .call_tool(CallToolRequestParams::new("web_search").with_arguments(args))
