@@ -56,6 +56,37 @@ pub struct FetchRequestBody<'a> {
     pub max_characters: Option<u64>,
 }
 
+/// Check if two URLs have the same origin (scheme, host, and effective port).
+pub fn is_same_origin(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host().is_some()
+        && a.host() == b.host()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// Evaluates whether a redirect from previous URLs to the target URL should be followed.
+///
+/// Invariant: A credential-bearing request must not follow a redirect to a different origin.
+/// Returns true if all previous hops share the exact same origin (scheme, host, effective port)
+/// as the target URL, and redirect depth is within the hop limit (< 10).
+pub fn should_follow_redirect(previous: &[Url], next: &Url) -> bool {
+    if previous.is_empty() || previous.len() >= 10 {
+        return false;
+    }
+    previous.iter().all(|prev| is_same_origin(prev, next))
+}
+
+/// Custom redirect policy enforcing the same-origin invariant across redirect hops.
+pub fn same_origin_redirect_policy() -> Policy {
+    Policy::custom(|attempt| {
+        if should_follow_redirect(attempt.previous(), attempt.url()) {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
 impl NineRouterClient {
     pub fn new(config: &Config) -> Result<Self> {
         let base_url = validate_and_normalize_base_url(&config.base_url)?;
@@ -74,25 +105,10 @@ impl NineRouterClient {
             }
         }
 
-        // Custom redirect policy: do NOT forward Authorization to different hosts (R-UP-05, S-10)
-        let redirect_policy = Policy::custom(|attempt| {
-            if attempt
-                .previous()
-                .iter()
-                .any(|prev| prev.host() != attempt.url().host())
-            {
-                // Prevent following redirects to different host when credentials are involved
-                attempt.stop()
-            } else if attempt.previous().len() >= 10 {
-                attempt.stop()
-            } else {
-                attempt.follow()
-            }
-        });
-
+        // Custom redirect policy: do NOT follow redirects across origin boundaries (scheme, host, effective port)
         let client = Client::builder()
             .default_headers(headers)
-            .redirect(redirect_policy)
+            .redirect(same_origin_redirect_policy())
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()

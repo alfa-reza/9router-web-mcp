@@ -7,6 +7,38 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    vars: Vec<&'static str>,
+}
+
+impl EnvGuard {
+    fn new(vars: Vec<&'static str>) -> Self {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for var in &vars {
+            std::env::remove_var(var);
+        }
+        Self { _lock: lock, vars }
+    }
+
+    fn set(&mut self, key: &'static str, val: &str) {
+        std::env::set_var(key, val);
+        if !self.vars.contains(&key) {
+            self.vars.push(key);
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for var in &self.vars {
+            std::env::remove_var(var);
+        }
+    }
+}
+
 #[test]
 fn test_default_config() {
     let cfg = Config::default();
@@ -223,12 +255,13 @@ fn test_validate_and_normalize_base_url_detailed() {
 
 #[test]
 fn test_resolve_path_precedence() {
+    let mut guard = EnvGuard::new(vec!["NINEROUTER_CONFIG"]);
     let dir = tempdir().unwrap();
     let cli_path = dir.path().join("cli_config.toml");
     let env_path = dir.path().join("env_config.toml");
 
     // 1. CLI override takes highest precedence
-    std::env::set_var("NINEROUTER_CONFIG", env_path.to_str().unwrap());
+    guard.set("NINEROUTER_CONFIG", env_path.to_str().unwrap());
     let resolved = Config::resolve_path(Some(&cli_path)).unwrap();
     assert_eq!(resolved, cli_path);
 
@@ -288,6 +321,36 @@ fn test_parse_config_arg() {
     // No config argument present
     let args = vec!["prog".into(), "--help".into()];
     assert_eq!(parse_config_arg(&args).unwrap(), None);
+
+    // --config followed by option flag must not treat flag as path
+    let args = vec!["prog".into(), "--config".into(), "--help".into()];
+    assert!(parse_config_arg(&args).is_err());
+
+    let args = vec!["prog".into(), "-c".into(), "--help".into()];
+    assert!(parse_config_arg(&args).is_err());
+
+    // Order invariance between command and --config
+    let args = vec![
+        "prog".into(),
+        "configure".into(),
+        "--config".into(),
+        "/my/config.toml".into(),
+    ];
+    assert_eq!(
+        parse_config_arg(&args).unwrap(),
+        Some(PathBuf::from("/my/config.toml"))
+    );
+
+    let args = vec![
+        "prog".into(),
+        "--config".into(),
+        "/my/config.toml".into(),
+        "configure".into(),
+    ];
+    assert_eq!(
+        parse_config_arg(&args).unwrap(),
+        Some(PathBuf::from("/my/config.toml"))
+    );
 }
 
 #[test]
@@ -314,21 +377,22 @@ fn test_env_overrides_precedence() {
     };
     file_cfg.save(&config_path).unwrap();
 
+    let mut guard = EnvGuard::new(vec![
+        "NINEROUTER_URL",
+        "NINEROUTER_KEY",
+        "NINEROUTER_SEARCH_COMBO",
+        "NINEROUTER_FETCH_COMBO",
+        "NINEROUTER_TIMEOUT_SECS",
+    ]);
+
     // Set environment overrides
-    std::env::set_var("NINEROUTER_URL", "http://env-host:20128/");
-    std::env::set_var("NINEROUTER_KEY", "sk-env-key");
-    std::env::set_var("NINEROUTER_SEARCH_COMBO", "env-search");
-    std::env::set_var("NINEROUTER_FETCH_COMBO", "env-fetch");
-    std::env::set_var("NINEROUTER_TIMEOUT_SECS", "50");
+    guard.set("NINEROUTER_URL", "http://env-host:20128/");
+    guard.set("NINEROUTER_KEY", "sk-env-key");
+    guard.set("NINEROUTER_SEARCH_COMBO", "env-search");
+    guard.set("NINEROUTER_FETCH_COMBO", "env-fetch");
+    guard.set("NINEROUTER_TIMEOUT_SECS", "50");
 
     let resolved = Config::resolve(Some(&config_path)).expect("Resolve failed");
-
-    // Clear environment overrides
-    std::env::remove_var("NINEROUTER_URL");
-    std::env::remove_var("NINEROUTER_KEY");
-    std::env::remove_var("NINEROUTER_SEARCH_COMBO");
-    std::env::remove_var("NINEROUTER_FETCH_COMBO");
-    std::env::remove_var("NINEROUTER_TIMEOUT_SECS");
 
     assert_eq!(resolved.base_url, "http://env-host:20128");
     assert_eq!(resolved.api_key, Some("sk-env-key".to_string()));
@@ -676,4 +740,317 @@ fn test_client_and_server_reject_malformed_config() {
         ..Config::default()
     };
     assert!(NineRouterMcpServer::new(&bad_fetch_cfg).is_err());
+}
+
+#[test]
+fn test_config_debug_secret_safe_and_retains_useful_fields() {
+    let secret = "sk-super-secret-api-token-987654321";
+    let cfg = Config {
+        base_url: "http://127.0.0.1:20128".to_string(),
+        api_key: Some(secret.to_string()),
+        search_combo: "my-search-combo".to_string(),
+        fetch_combo: "my-fetch-combo".to_string(),
+        timeout_secs: 42,
+    };
+
+    let normal_debug = format!("{:?}", cfg);
+    let pretty_debug = format!("{:#?}", cfg);
+
+    // Raw API key must NEVER be contained in normal or pretty Debug
+    assert!(
+        !normal_debug.contains(secret),
+        "Normal Debug leaked raw API key: {}",
+        normal_debug
+    );
+    assert!(
+        !pretty_debug.contains(secret),
+        "Pretty Debug leaked raw API key: {}",
+        pretty_debug
+    );
+
+    // Masked representation should be present
+    assert!(normal_debug.contains("sk-...4321"));
+    assert!(pretty_debug.contains("sk-...4321"));
+
+    // Useful safe fields must remain visible in both forms
+    for (label, output) in [("normal", &normal_debug), ("pretty", &pretty_debug)] {
+        assert!(
+            output.contains("http://127.0.0.1:20128"),
+            "{} Debug missing base_url value",
+            label
+        );
+        assert!(
+            output.contains("my-search-combo"),
+            "{} Debug missing search_combo value",
+            label
+        );
+        assert!(
+            output.contains("my-fetch-combo"),
+            "{} Debug missing fetch_combo value",
+            label
+        );
+        assert!(
+            output.contains("42"),
+            "{} Debug missing timeout_secs value",
+            label
+        );
+        assert!(
+            output.contains("base_url"),
+            "{} Debug missing base_url field name",
+            label
+        );
+        assert!(
+            output.contains("search_combo"),
+            "{} Debug missing search_combo field name",
+            label
+        );
+        assert!(
+            output.contains("fetch_combo"),
+            "{} Debug missing fetch_combo field name",
+            label
+        );
+        assert!(
+            output.contains("timeout_secs"),
+            "{} Debug missing timeout_secs field name",
+            label
+        );
+    }
+
+    // Config with None API key
+    let no_key_cfg = Config {
+        api_key: None,
+        ..cfg.clone()
+    };
+    let normal_no_key = format!("{:?}", no_key_cfg);
+    let pretty_no_key = format!("{:#?}", no_key_cfg);
+    assert!(normal_no_key.contains("api_key: None"));
+    assert!(pretty_no_key.contains("api_key: None"));
+
+    // Config with short secret (<= 8 characters)
+    let short_secret = "12345678";
+    let short_cfg = Config {
+        api_key: Some(short_secret.to_string()),
+        ..cfg.clone()
+    };
+    let normal_short = format!("{:?}", short_cfg);
+    let pretty_short = format!("{:#?}", short_cfg);
+    assert!(!normal_short.contains(short_secret));
+    assert!(!pretty_short.contains(short_secret));
+    assert!(normal_short.contains("***"));
+    assert!(pretty_short.contains("***"));
+
+    // Config with multibyte UTF-8 secret
+    let utf8_secret = "🔑秘密APIキー99887766";
+    let utf8_cfg = Config {
+        api_key: Some(utf8_secret.to_string()),
+        ..cfg
+    };
+    let normal_utf8 = format!("{:?}", utf8_cfg);
+    let pretty_utf8 = format!("{:#?}", utf8_cfg);
+    assert!(!normal_utf8.contains(utf8_secret));
+    assert!(!pretty_utf8.contains(utf8_secret));
+}
+
+#[test]
+fn test_env_preferred_aliases_keep_precedence() {
+    let mut guard = EnvGuard::new(vec![
+        "NINEROUTER_URL",
+        "NINEROUTER_BASE_URL",
+        "NINEROUTER_KEY",
+        "NINEROUTER_API_KEY",
+    ]);
+
+    guard.set("NINEROUTER_URL", "http://primary-host:20128");
+    guard.set("NINEROUTER_BASE_URL", "http://secondary-host:20128");
+    guard.set("NINEROUTER_KEY", "sk-primary-key");
+    guard.set("NINEROUTER_API_KEY", "sk-secondary-key");
+
+    let cfg = Config::resolve(None).expect("Resolve should succeed");
+    assert_eq!(cfg.base_url, "http://primary-host:20128");
+    assert_eq!(cfg.api_key.as_deref(), Some("sk-primary-key"));
+}
+
+#[test]
+fn test_env_empty_and_whitespace_preferred_aliases_fall_through() {
+    let mut guard = EnvGuard::new(vec![
+        "NINEROUTER_URL",
+        "NINEROUTER_BASE_URL",
+        "NINEROUTER_KEY",
+        "NINEROUTER_API_KEY",
+    ]);
+
+    // 1. Empty string preferred aliases fall through to secondary
+    guard.set("NINEROUTER_URL", "");
+    guard.set("NINEROUTER_BASE_URL", "http://secondary-host:20128");
+    guard.set("NINEROUTER_KEY", "");
+    guard.set("NINEROUTER_API_KEY", "sk-secondary-key");
+
+    let cfg = Config::resolve(None).expect("Resolve should succeed");
+    assert_eq!(cfg.base_url, "http://secondary-host:20128");
+    assert_eq!(cfg.api_key.as_deref(), Some("sk-secondary-key"));
+
+    // 2. Whitespace-only string preferred aliases fall through to secondary
+    guard.set("NINEROUTER_URL", "   \t  \n");
+    guard.set("NINEROUTER_KEY", "   \t  ");
+
+    let cfg2 = Config::resolve(None).expect("Resolve should succeed");
+    assert_eq!(cfg2.base_url, "http://secondary-host:20128");
+    assert_eq!(cfg2.api_key.as_deref(), Some("sk-secondary-key"));
+}
+
+#[test]
+fn test_env_empty_aliases_fall_through_to_file_and_defaults() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    let file_cfg = Config {
+        base_url: "http://file-host:20128".to_string(),
+        api_key: Some("sk-file-key".to_string()),
+        search_combo: "search-file".to_string(),
+        fetch_combo: "fetch-file".to_string(),
+        timeout_secs: 15,
+    };
+    file_cfg.save(&config_path).unwrap();
+
+    let mut guard = EnvGuard::new(vec![
+        "NINEROUTER_URL",
+        "NINEROUTER_BASE_URL",
+        "NINEROUTER_KEY",
+        "NINEROUTER_API_KEY",
+    ]);
+
+    // Both aliases empty/whitespace -> falls through to file config
+    guard.set("NINEROUTER_URL", "  ");
+    guard.set("NINEROUTER_BASE_URL", "");
+    guard.set("NINEROUTER_KEY", "");
+    guard.set("NINEROUTER_API_KEY", "  \t ");
+
+    let resolved = Config::resolve(Some(&config_path)).expect("Resolve should succeed");
+    assert_eq!(resolved.base_url, "http://file-host:20128");
+    assert_eq!(resolved.api_key.as_deref(), Some("sk-file-key"));
+
+    // Without file config, falls through to defaults
+    let resolved_default = Config::resolve(Some(&dir.path().join("nonexistent.toml")))
+        .expect("Resolve should succeed");
+    assert_eq!(resolved_default.base_url, DEFAULT_BASE_URL);
+    assert_eq!(resolved_default.api_key, None);
+}
+
+#[test]
+fn test_save_persists_canonical_normalized_values() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    let non_canonical_cfg = Config {
+        base_url: "http://localhost:20128///".to_string(),
+        api_key: Some("   sk-padded-secret-key   ".to_string()),
+        search_combo: "   custom-search   ".to_string(),
+        fetch_combo: "   custom-fetch   ".to_string(),
+        timeout_secs: 25,
+    };
+
+    non_canonical_cfg
+        .save(&config_path)
+        .expect("Save should succeed");
+
+    // Inspect the raw file content on disk to verify canonical values were persisted
+    let raw_content = fs::read_to_string(&config_path).unwrap();
+    assert!(
+        raw_content.contains(r#"base_url = "http://localhost:20128""#),
+        "Raw content must contain normalized base_url without trailing slash, got: {}",
+        raw_content
+    );
+    assert!(
+        raw_content.contains(r#"api_key = "sk-padded-secret-key""#),
+        "Raw content must contain trimmed api_key, got: {}",
+        raw_content
+    );
+    assert!(
+        raw_content.contains(r#"search_combo = "custom-search""#),
+        "Raw content must contain trimmed search_combo, got: {}",
+        raw_content
+    );
+    assert!(
+        raw_content.contains(r#"fetch_combo = "custom-fetch""#),
+        "Raw content must contain trimmed fetch_combo, got: {}",
+        raw_content
+    );
+
+    // Load back and verify it matches the canonical equivalent
+    let loaded = Config::load_from_file(&config_path)
+        .expect("Load should succeed")
+        .expect("Config should exist");
+
+    let expected_canonical = non_canonical_cfg.canonical().unwrap();
+    assert_eq!(loaded, expected_canonical);
+    assert_eq!(loaded.base_url, "http://localhost:20128");
+    assert_eq!(loaded.api_key.as_deref(), Some("sk-padded-secret-key"));
+    assert_eq!(loaded.search_combo, "custom-search");
+    assert_eq!(loaded.fetch_combo, "custom-fetch");
+    assert_eq!(loaded.timeout_secs, 25);
+}
+
+#[test]
+fn test_save_normalizes_empty_or_whitespace_api_key_to_none() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    let cfg_with_empty_key = Config {
+        base_url: "http://localhost:20128/".to_string(),
+        api_key: Some("   \t  ".to_string()),
+        search_combo: "search-combo".to_string(),
+        fetch_combo: "fetch-combo".to_string(),
+        timeout_secs: 30,
+    };
+
+    cfg_with_empty_key
+        .save(&config_path)
+        .expect("Save should succeed");
+
+    let raw_content = fs::read_to_string(&config_path).unwrap();
+    assert!(
+        !raw_content.contains("api_key"),
+        "Raw content should omit empty api_key, got: {}",
+        raw_content
+    );
+
+    let loaded = Config::load_from_file(&config_path)
+        .expect("Load failed")
+        .expect("Config should exist");
+
+    assert_eq!(loaded.api_key, None);
+    assert_eq!(loaded, cfg_with_empty_key.canonical().unwrap());
+}
+
+#[test]
+fn test_save_load_round_trip_idempotent() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    let initial = Config {
+        base_url: "https://remote.server.example:8443/prefix///".to_string(),
+        api_key: Some("  sk-test-token-roundtrip  ".to_string()),
+        search_combo: "  s-combo  ".to_string(),
+        fetch_combo: "  f-combo  ".to_string(),
+        timeout_secs: 60,
+    };
+
+    // First save & load
+    initial.save(&config_path).unwrap();
+    let round_1 = Config::load_from_file(&config_path).unwrap().unwrap();
+
+    assert_eq!(round_1, initial.canonical().unwrap());
+    assert_eq!(
+        round_1.base_url,
+        "https://remote.server.example:8443/prefix"
+    );
+    assert_eq!(round_1.api_key.as_deref(), Some("sk-test-token-roundtrip"));
+    assert_eq!(round_1.search_combo, "s-combo");
+    assert_eq!(round_1.fetch_combo, "f-combo");
+
+    // Second save & load
+    round_1.save(&config_path).unwrap();
+    let round_2 = Config::load_from_file(&config_path).unwrap().unwrap();
+
+    assert_eq!(round_1, round_2);
 }
