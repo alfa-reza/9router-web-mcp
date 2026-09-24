@@ -45,7 +45,22 @@ async fn test_search_tool_success() {
     let result = execute_web_search(&client, &config.search_combo, params).await;
     assert_eq!(result.is_error, Some(false));
     assert!(result.structured_content.is_some());
-    assert!(!result.content.is_empty());
+    let structured = result.structured_content.unwrap();
+    assert_eq!(structured["results"][0]["title"], "Result 1");
+
+    assert_eq!(result.content.len(), 1);
+    let text = result.content[0]
+        .as_text()
+        .expect("Expected text content block")
+        .text
+        .as_str();
+    assert!(
+        !text.contains('\n'),
+        "Search text content must be compact JSON: {}",
+        text
+    );
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed, structured);
 }
 
 #[tokio::test]

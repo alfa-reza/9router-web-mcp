@@ -56,7 +56,8 @@ impl NineRouterMcpServer {
 impl NineRouterMcpServer {
     #[tool(
         name = "web_search",
-        description = "Search the web and return the raw upstream search payload as JSON. Use when the user needs current information, links, or news. Searches through the configured 9Router search combo."
+        description = "Search the web and return the raw upstream search payload as JSON. Use when the user needs current information, links, or news. Searches through the configured 9Router search combo.",
+        annotations(read_only_hint = true, open_world_hint = true)
     )]
     pub async fn web_search(
         &self,
@@ -67,7 +68,8 @@ impl NineRouterMcpServer {
 
     #[tool(
         name = "web_fetch",
-        description = "Fetch a URL and return its content as markdown (default), plain text, or HTML. Automatically converts GitHub source file (/blob/) URLs to raw content. Fetches through the configured 9Router fetch combo."
+        description = "Fetch a URL and return its content as markdown (default), plain text, or HTML. Automatically converts GitHub source file (/blob/) URLs to raw content. Fetches through the configured 9Router fetch combo.",
+        annotations(read_only_hint = true, open_world_hint = true)
     )]
     pub async fn web_fetch(
         &self,
