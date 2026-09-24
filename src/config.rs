@@ -660,34 +660,8 @@ pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<
 ///
 /// Returns `Ok(Some(PathBuf))` if `--config <PATH>`, `-c <PATH>`, or `--config=<PATH>` is present.
 /// Returns `Ok(None)` if no config flag was passed.
-/// Returns an error if the flag is provided without a non-empty path.
+/// Returns an error if the flag is provided without a non-empty path, or if arguments are malformed.
 pub fn parse_config_arg(args: &[String]) -> Result<Option<PathBuf>> {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--config" || args[i] == "-c" {
-            if i + 1 < args.len() {
-                let val = args[i + 1].trim();
-                if val.is_empty() {
-                    return Err(AppError::Config(
-                        "Flag '--config' / '-c' requires a non-empty path argument".to_string(),
-                    ));
-                }
-                return Ok(Some(PathBuf::from(val)));
-            } else {
-                return Err(AppError::Config(
-                    "Flag '--config' / '-c' requires a path argument".to_string(),
-                ));
-            }
-        } else if let Some(stripped) = args[i].strip_prefix("--config=") {
-            let val = stripped.trim();
-            if val.is_empty() {
-                return Err(AppError::Config(
-                    "Flag '--config=' requires a non-empty path argument".to_string(),
-                ));
-            }
-            return Ok(Some(PathBuf::from(val)));
-        }
-        i += 1;
-    }
-    Ok(None)
+    let cli = crate::cli::Cli::parse(args)?;
+    Ok(cli.config_path)
 }

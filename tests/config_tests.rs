@@ -321,6 +321,36 @@ fn test_parse_config_arg() {
     // No config argument present
     let args = vec!["prog".into(), "--help".into()];
     assert_eq!(parse_config_arg(&args).unwrap(), None);
+
+    // --config followed by option flag must not treat flag as path
+    let args = vec!["prog".into(), "--config".into(), "--help".into()];
+    assert!(parse_config_arg(&args).is_err());
+
+    let args = vec!["prog".into(), "-c".into(), "--help".into()];
+    assert!(parse_config_arg(&args).is_err());
+
+    // Order invariance between command and --config
+    let args = vec![
+        "prog".into(),
+        "configure".into(),
+        "--config".into(),
+        "/my/config.toml".into(),
+    ];
+    assert_eq!(
+        parse_config_arg(&args).unwrap(),
+        Some(PathBuf::from("/my/config.toml"))
+    );
+
+    let args = vec![
+        "prog".into(),
+        "--config".into(),
+        "/my/config.toml".into(),
+        "configure".into(),
+    ];
+    assert_eq!(
+        parse_config_arg(&args).unwrap(),
+        Some(PathBuf::from("/my/config.toml"))
+    );
 }
 
 #[test]
