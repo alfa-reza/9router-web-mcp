@@ -25,7 +25,7 @@ fn default_timeout_secs() -> u64 {
     DEFAULT_TIMEOUT_SECS
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub base_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,6 +36,21 @@ pub struct Config {
     pub fetch_combo: String,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("base_url", &self.base_url)
+            .field(
+                "api_key",
+                &self.api_key.as_ref().map(|_| self.masked_api_key()),
+            )
+            .field("search_combo", &self.search_combo)
+            .field("fetch_combo", &self.fetch_combo)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -132,6 +147,17 @@ pub fn validate_and_normalize_base_url(url: &str) -> Result<String> {
     Ok(result)
 }
 
+fn env_non_empty(var_name: &str) -> Option<String> {
+    std::env::var(var_name).ok().and_then(|val| {
+        let trimmed = val.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 impl Config {
     /// Return the standard default configuration file path:
     /// $XDG_CONFIG_HOME/9router-mcp-web/config.toml or ~/.config/9router-mcp-web/config.toml
@@ -172,11 +198,8 @@ impl Config {
             return Ok(p.to_path_buf());
         }
 
-        if let Ok(env_path) = std::env::var("NINEROUTER_CONFIG") {
-            let trimmed = env_path.trim();
-            if !trimmed.is_empty() {
-                return Ok(PathBuf::from(trimmed));
-            }
+        if let Some(env_path) = env_non_empty("NINEROUTER_CONFIG") {
+            return Ok(PathBuf::from(env_path));
         }
 
         Self::default_path()
@@ -283,39 +306,27 @@ impl Config {
         let config_path = Self::resolve_path(config_path_override)?;
         let file_config = Self::load_from_file(&config_path)?.unwrap_or_default();
 
-        // 1. Base URL override
-        let base_url = if let Some(env_url) = std::env::var("NINEROUTER_URL")
-            .or_else(|_| std::env::var("NINEROUTER_BASE_URL"))
-            .ok()
-            .map(|u| u.trim().to_string())
-            .filter(|u| !u.is_empty())
+        // 1. Base URL override (preferred alias NINEROUTER_URL falls through if empty/whitespace to NINEROUTER_BASE_URL)
+        let base_url = if let Some(env_url) =
+            env_non_empty("NINEROUTER_URL").or_else(|| env_non_empty("NINEROUTER_BASE_URL"))
         {
             validate_and_normalize_base_url(&env_url)?
         } else {
             file_config.base_url
         };
 
-        // 2. API Key override
-        let api_key = std::env::var("NINEROUTER_KEY")
-            .or_else(|_| std::env::var("NINEROUTER_API_KEY"))
-            .ok()
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
+        // 2. API Key override (preferred alias NINEROUTER_KEY falls through if empty/whitespace to NINEROUTER_API_KEY)
+        let api_key = env_non_empty("NINEROUTER_KEY")
+            .or_else(|| env_non_empty("NINEROUTER_API_KEY"))
             .or(file_config.api_key);
 
         // 3. Search Combo override
-        let search_combo = std::env::var("NINEROUTER_SEARCH_COMBO")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or(file_config.search_combo);
+        let search_combo =
+            env_non_empty("NINEROUTER_SEARCH_COMBO").unwrap_or(file_config.search_combo);
 
         // 4. Fetch Combo override
-        let fetch_combo = std::env::var("NINEROUTER_FETCH_COMBO")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or(file_config.fetch_combo);
+        let fetch_combo =
+            env_non_empty("NINEROUTER_FETCH_COMBO").unwrap_or(file_config.fetch_combo);
 
         // 5. Timeout override
         let timeout_secs = if let Ok(t) = std::env::var("NINEROUTER_TIMEOUT_SECS") {
@@ -349,12 +360,9 @@ impl Config {
         })
     }
 
-    /// Save configuration securely to disk with mode 0600 on Unix.
-    ///
-    /// If the parent directory does not exist, it is created with mode 0700 on Unix.
-    /// If the parent directory already exists, its permissions are left untouched.
-    pub fn save(&self, path: &Path) -> Result<()> {
-        validate_and_normalize_base_url(&self.base_url)?;
+    /// Validate and normalize configuration into its canonical form.
+    pub fn canonical(&self) -> Result<Self> {
+        let base_url = validate_and_normalize_base_url(&self.base_url)?;
 
         let search_combo = self.search_combo.trim();
         if search_combo.is_empty() {
@@ -375,6 +383,31 @@ impl Config {
                 "timeout_secs must be greater than 0".to_string(),
             ));
         }
+
+        let api_key = self.api_key.as_deref().and_then(|k| {
+            let trimmed = k.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+
+        Ok(Self {
+            base_url,
+            api_key,
+            search_combo: search_combo.to_string(),
+            fetch_combo: fetch_combo.to_string(),
+            timeout_secs: self.timeout_secs,
+        })
+    }
+
+    /// Save configuration securely to disk with mode 0600 on Unix.
+    ///
+    /// If the parent directory does not exist, it is created with mode 0700 on Unix.
+    /// If the parent directory already exists, its permissions are left untouched.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let canonical = self.canonical()?;
 
         let parent = match path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
@@ -407,7 +440,7 @@ impl Config {
             }
         }
 
-        let toml_str = toml::to_string_pretty(self)
+        let toml_str = toml::to_string_pretty(&canonical)
             .map_err(|e| AppError::Config(format!("Failed to serialize config to TOML: {}", e)))?;
 
         let mut tmp_file = tempfile::Builder::new()
