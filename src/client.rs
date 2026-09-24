@@ -1,7 +1,8 @@
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::redirect::Policy;
 use reqwest::Client;
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 use url::Url;
@@ -26,6 +27,31 @@ impl NineRouterClient {
     }
 }
 
+/// Provider-specific search options supported by 9Router.
+///
+/// Only documented and intentionally supported per-request option fields are accepted.
+/// Arbitrary keys and endpoint overrides such as `baseUrl` are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+#[schemars(inline)]
+pub struct SearchProviderOptions {
+    /// Google Custom Search Engine ID (required for google-pse).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cx: Option<String>,
+
+    /// Search depth for providers supporting it (e.g. 'fast', 'standard', 'deep' for Linkup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<String>,
+
+    /// Pagination cursor for continuing search (e.g. for Xquik).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+
+    /// Query type for providers supporting it (e.g. 'Latest', 'Top' for Xquik).
+    #[serde(default, rename = "queryType", skip_serializing_if = "Option::is_none")]
+    pub query_type: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SearchRequestBody<'a> {
     pub model: &'a str,
@@ -43,7 +69,7 @@ pub struct SearchRequestBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_filter: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_options: Option<&'a serde_json::Map<String, Value>>,
+    pub provider_options: Option<&'a SearchProviderOptions>,
 }
 
 #[derive(Debug, Serialize)]

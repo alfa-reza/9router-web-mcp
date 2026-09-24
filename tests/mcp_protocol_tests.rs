@@ -89,6 +89,7 @@ async fn test_server_handler_list_tools_exact_two() {
     }
 
     // Verify schemas do NOT expose model, provider, or credentials (AC-03, AC-05)
+    // Verify schemas do NOT expose model, provider, credentials, or baseUrl (AC-03, AC-05)
     for tool in &tools.tools {
         let schema_str = serde_json::to_string(&tool.input_schema).unwrap();
         assert!(
@@ -106,7 +107,34 @@ async fn test_server_handler_list_tools_exact_two() {
             "Tool schema should not expose api_key: {}",
             tool.name
         );
+        assert!(
+            !schema_str.contains("\"baseUrl\""),
+            "Tool schema should not expose baseUrl: {}",
+            tool.name
+        );
     }
+
+    // Verify web_search schema restricts provider_options to verified options
+    let search_tool = tools.tools.iter().find(|t| t.name == "web_search").unwrap();
+    let search_schema_val = serde_json::to_value(&search_tool.input_schema).unwrap();
+    let provider_opts_schema = &search_schema_val["properties"]["provider_options"];
+    let opt_subschema =
+        if let Some(any_of) = provider_opts_schema.get("anyOf").and_then(|a| a.as_array()) {
+            any_of
+                .iter()
+                .find(|s| s.get("properties").is_some() || s.get("type") == Some(&json!("object")))
+                .expect("provider_options anyOf must contain an object schema")
+        } else {
+            provider_opts_schema
+        };
+    assert_eq!(opt_subschema["additionalProperties"], json!(false));
+    let opt_props = opt_subschema["properties"].as_object().unwrap();
+    assert!(opt_props.contains_key("cx"));
+    assert!(opt_props.contains_key("depth"));
+    assert!(opt_props.contains_key("cursor"));
+    assert!(opt_props.contains_key("queryType"));
+    assert!(!opt_props.contains_key("baseUrl"));
+    assert_eq!(opt_props.len(), 4);
 
     // Call web_search tool through client
     let args = json!({ "query": "test query" })
