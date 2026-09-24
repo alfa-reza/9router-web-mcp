@@ -1301,3 +1301,154 @@ fn test_ipv6_normalization_and_origin_equivalence() {
         &ipv6_http_8443
     ));
 }
+
+#[tokio::test]
+async fn test_utf8_truncation_multibyte_crossing_boundary_no_replacement_char() {
+    let mock_server = MockServer::start().await;
+
+    let config = Config {
+        base_url: mock_server.uri(),
+        ..Default::default()
+    };
+    let client = NineRouterClient::new(&config).unwrap();
+
+    // 1023 ASCII bytes + 4-byte crab emoji (\u{1F980} = [0xF0, 0x9F, 0xA6, 0x80]) + trailing bytes
+    // Crab emoji crosses bytes 1023..1027, crossing the 1024-byte preview limit.
+    let mut body = "a".repeat(1023).into_bytes();
+    body.extend_from_slice("🦀".as_bytes());
+    body.extend_from_slice(b"extra_tail_data");
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(500).set_body_bytes(body))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let req = SearchRequestBody {
+        model: "search-combo",
+        query: "test",
+        max_results: None,
+        search_type: None,
+        country: None,
+        language: None,
+        time_range: None,
+        domain_filter: None,
+        provider_options: None,
+    };
+
+    let err = client.search(&req).await.unwrap_err();
+    match err {
+        AppError::UpstreamServerError { status, message } => {
+            assert_eq!(status, 500);
+            assert!(message.contains("... [truncated]"));
+            // Must NOT contain Unicode replacement character U+FFFD
+            assert!(
+                !message.contains('\u{FFFD}'),
+                "Error message contained replacement character due to split multibyte UTF-8: {}",
+                message
+            );
+            // Sliced content before "... [truncated]" must stop cleanly before the split crab emoji (1023 'a's)
+            let prefix = message.strip_suffix("... [truncated]").unwrap();
+            assert_eq!(prefix.len(), 1023);
+            assert_eq!(prefix, "a".repeat(1023));
+        }
+        other => panic!("Expected UpstreamServerError, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_utf8_truncation_multibyte_ending_exactly_at_limit() {
+    let mock_server = MockServer::start().await;
+
+    let config = Config {
+        base_url: mock_server.uri(),
+        ..Default::default()
+    };
+    let client = NineRouterClient::new(&config).unwrap();
+
+    // 1020 ASCII bytes + 4-byte crab emoji (ends exactly at 1024) + trailing bytes
+    let mut body = "a".repeat(1020).into_bytes();
+    body.extend_from_slice("🦀".as_bytes());
+    body.extend_from_slice(b"extra_tail_data");
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(500).set_body_bytes(body))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let req = SearchRequestBody {
+        model: "search-combo",
+        query: "test",
+        max_results: None,
+        search_type: None,
+        country: None,
+        language: None,
+        time_range: None,
+        domain_filter: None,
+        provider_options: None,
+    };
+
+    let err = client.search(&req).await.unwrap_err();
+    match err {
+        AppError::UpstreamServerError { status, message } => {
+            assert_eq!(status, 500);
+            assert!(message.contains("... [truncated]"));
+            assert!(!message.contains('\u{FFFD}'));
+            let prefix = message.strip_suffix("... [truncated]").unwrap();
+            assert_eq!(prefix.len(), 1024);
+            assert!(prefix.ends_with('🦀'));
+        }
+        other => panic!("Expected UpstreamServerError, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_utf8_truncation_invalid_json_body_multibyte_crossing_boundary() {
+    let mock_server = MockServer::start().await;
+
+    let config = Config {
+        base_url: mock_server.uri(),
+        ..Default::default()
+    };
+    let client = NineRouterClient::new(&config).unwrap();
+
+    let mut body = "NOT_JSON ".repeat(113).into_bytes(); // 9 * 113 = 1017 bytes
+    body.extend_from_slice("bbbbbb".as_bytes()); // 1017 + 6 = 1023 bytes
+    body.extend_from_slice("🦀".as_bytes()); // 1023..1027
+    body.extend_from_slice(b"trailing invalid json content");
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let req = SearchRequestBody {
+        model: "search-combo",
+        query: "test",
+        max_results: None,
+        search_type: None,
+        country: None,
+        language: None,
+        time_range: None,
+        domain_filter: None,
+        provider_options: None,
+    };
+
+    let err = client.search(&req).await.unwrap_err();
+    match err {
+        AppError::InvalidResponseJson(msg) => {
+            assert!(msg.contains("... [truncated]"));
+            assert!(
+                !msg.contains('\u{FFFD}'),
+                "Invalid response JSON preview contained replacement character: {}",
+                msg
+            );
+        }
+        other => panic!("Expected InvalidResponseJson, got {:?}", other),
+    }
+}

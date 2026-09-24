@@ -44,6 +44,51 @@ async fn test_server_handler_list_tools_exact_two() {
     assert!(tool_names.contains(&"web_search"));
     assert!(tool_names.contains(&"web_fetch"));
 
+    // Verify tool annotations for both tools (A. Tool annotations)
+    for tool in &tools.tools {
+        assert!(
+            tool.annotations.is_some(),
+            "Tool {} missing annotations",
+            tool.name
+        );
+        let annotations = tool.annotations.as_ref().unwrap();
+        assert_eq!(
+            annotations.read_only_hint,
+            Some(true),
+            "Tool {} read_only_hint must be true",
+            tool.name
+        );
+        assert_eq!(
+            annotations.open_world_hint,
+            Some(true),
+            "Tool {} open_world_hint must be true",
+            tool.name
+        );
+        assert_eq!(
+            annotations.destructive_hint, None,
+            "Tool {} destructive_hint should not be set",
+            tool.name
+        );
+        assert_eq!(
+            annotations.idempotent_hint, None,
+            "Tool {} idempotent_hint should not be set",
+            tool.name
+        );
+
+        let serialized_annotations = serde_json::to_value(annotations).unwrap();
+        assert_eq!(
+            serialized_annotations.get("readOnlyHint"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            serialized_annotations.get("openWorldHint"),
+            Some(&json!(true))
+        );
+        assert!(serialized_annotations.get("destructiveHint").is_none());
+        assert!(serialized_annotations.get("idempotentHint").is_none());
+    }
+
+    // Verify schemas do NOT expose model, provider, or credentials (AC-03, AC-05)
     // Verify schemas do NOT expose model, provider, credentials, or baseUrl (AC-03, AC-05)
     for tool in &tools.tools {
         let schema_str = serde_json::to_string(&tool.input_schema).unwrap();
@@ -112,13 +157,25 @@ async fn test_server_handler_list_tools_exact_two() {
 async fn test_mcp_full_flow_with_mock_9router() {
     let mock_server = MockServer::start().await;
 
+    let search_payload = json!({
+        "results": [
+            { "title": "WireMock Test", "url": "https://wiremock.org" }
+        ]
+    });
     Mock::given(method("POST"))
         .and(path("/v1/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "results": [
-                { "title": "WireMock Test", "url": "https://wiremock.org" }
-            ]
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&search_payload))
+        .mount(&mock_server)
+        .await;
+
+    let fetch_payload = json!({
+        "title": "WireMock Home",
+        "content": "# WireMock\nFlexible API mocking",
+        "url": "https://wiremock.org"
+    });
+    Mock::given(method("POST"))
+        .and(path("/v1/web/fetch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&fetch_payload))
         .mount(&mock_server)
         .await;
 
@@ -144,19 +201,63 @@ async fn test_mcp_full_flow_with_mock_9router() {
 
     let client = ().serve((client_read, client_write)).await.expect("Client init failed");
 
-    let args = json!({ "query": "find wiremock" })
+    // 1. Verify web_search returns structured content and compact JSON text content
+    let search_args = json!({ "query": "find wiremock" })
         .as_object()
         .unwrap()
         .clone();
     let search_res = client
         .peer()
-        .call_tool(CallToolRequestParams::new("web_search").with_arguments(args))
+        .call_tool(CallToolRequestParams::new("web_search").with_arguments(search_args))
         .await
         .expect("Search call failed");
 
     assert_eq!(search_res.is_error, Some(false));
     assert!(search_res.structured_content.is_some());
-    assert!(!search_res.content.is_empty());
+    let search_structured = search_res.structured_content.unwrap();
+    assert_eq!(search_structured["results"][0]["title"], "WireMock Test");
+
+    assert_eq!(search_res.content.len(), 1);
+    let search_text = search_res.content[0]
+        .as_text()
+        .expect("Expected text content block")
+        .text
+        .as_str();
+    assert!(
+        !search_text.contains('\n'),
+        "search text content must be compact JSON"
+    );
+    let search_parsed: serde_json::Value = serde_json::from_str(search_text).unwrap();
+    assert_eq!(search_parsed, search_structured);
+
+    // 2. Verify web_fetch returns structured content and compact JSON text content
+    let fetch_args = json!({ "url": "https://wiremock.org" })
+        .as_object()
+        .unwrap()
+        .clone();
+    let fetch_res = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("web_fetch").with_arguments(fetch_args))
+        .await
+        .expect("Fetch call failed");
+
+    assert_eq!(fetch_res.is_error, Some(false));
+    assert!(fetch_res.structured_content.is_some());
+    let fetch_structured = fetch_res.structured_content.unwrap();
+    assert_eq!(fetch_structured["title"], "WireMock Home");
+
+    assert_eq!(fetch_res.content.len(), 1);
+    let fetch_text = fetch_res.content[0]
+        .as_text()
+        .expect("Expected text content block")
+        .text
+        .as_str();
+    assert!(
+        !fetch_text.contains('\n'),
+        "fetch text content must be compact JSON"
+    );
+    let fetch_parsed: serde_json::Value = serde_json::from_str(fetch_text).unwrap();
+    assert_eq!(fetch_parsed, fetch_structured);
 
     server_handle.abort();
 }

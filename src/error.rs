@@ -15,9 +15,6 @@ pub enum AppError {
     #[error("Configuration error: {0}")]
     Config(String),
 
-    #[error("Invalid parameter: {0}")]
-    InvalidInput(String),
-
     #[error("URL validation error: {0}")]
     InvalidUrl(String),
 

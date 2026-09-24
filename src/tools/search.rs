@@ -51,7 +51,7 @@ pub struct WebSearchParams {
 }
 
 pub fn tool_success(value: serde_json::Value) -> CallToolResult {
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    let text = serde_json::to_string(&value).unwrap_or_else(|_| value.to_string());
     let mut res = CallToolResult::structured(value);
     res.content = vec![ContentBlock::text(text)];
     res

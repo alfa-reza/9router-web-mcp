@@ -284,7 +284,7 @@ impl NineRouterClient {
     }
 }
 
-fn truncate_preview(s: &str) -> String {
+pub(crate) fn truncate_preview(s: &str) -> String {
     if s.len() <= MAX_ERROR_PREVIEW_BYTES {
         s.to_string()
     } else {
@@ -296,14 +296,13 @@ fn truncate_preview(s: &str) -> String {
     }
 }
 
-fn format_error_preview(bytes: &[u8]) -> String {
-    let capped_len = bytes.len().min(MAX_ERROR_PREVIEW_BYTES);
-    let s = String::from_utf8_lossy(&bytes[..capped_len]);
-    if bytes.len() > MAX_ERROR_PREVIEW_BYTES {
-        format!("{}... [truncated]", s)
+pub(crate) fn format_error_preview(bytes: &[u8]) -> String {
+    let capped = if bytes.len() > MAX_ERROR_PREVIEW_BYTES + 4 {
+        &bytes[..MAX_ERROR_PREVIEW_BYTES + 4]
     } else {
-        s.to_string()
-    }
+        bytes
+    };
+    truncate_preview(&String::from_utf8_lossy(capped))
 }
 
 fn extract_error_message(bytes: &[u8], status: u16) -> String {
@@ -331,5 +330,68 @@ fn extract_error_message(bytes: &[u8], status: u16) -> String {
         format!("HTTP {}", status)
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_preview_ascii_within_limit() {
+        let input = "a".repeat(1024);
+        assert_eq!(truncate_preview(&input), input);
+    }
+
+    #[test]
+    fn test_truncate_preview_ascii_exceeds_limit() {
+        let input = "a".repeat(1025);
+        let res = truncate_preview(&input);
+        assert_eq!(res, format!("{}... [truncated]", "a".repeat(1024)));
+    }
+
+    #[test]
+    fn test_truncate_preview_multibyte_crossing_boundary() {
+        // 1023 ASCII + 4-byte char + more
+        let input = format!("{}🦀extra", "a".repeat(1023));
+        let res = truncate_preview(&input);
+        assert_eq!(res, format!("{}... [truncated]", "a".repeat(1023)));
+        assert!(!res.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_format_error_preview_multibyte_crossing_boundary() {
+        // 1023 ASCII + 4-byte crab emoji + trailing bytes
+        let mut bytes = "a".repeat(1023).into_bytes();
+        bytes.extend_from_slice("🦀".as_bytes());
+        bytes.extend_from_slice(b"trailing bytes");
+
+        let res = format_error_preview(&bytes);
+        assert_eq!(res, format!("{}... [truncated]", "a".repeat(1023)));
+        assert!(!res.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_format_error_preview_multibyte_ending_at_limit() {
+        // 1020 ASCII + 4-byte crab emoji (ends exactly at 1024) + trailing bytes
+        let mut bytes = "a".repeat(1020).into_bytes();
+        bytes.extend_from_slice("🦀".as_bytes());
+        bytes.extend_from_slice(b"trailing bytes");
+
+        let res = format_error_preview(&bytes);
+        assert_eq!(res, format!("{}🦀... [truncated]", "a".repeat(1020)));
+        assert!(!res.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_format_error_preview_3byte_char_crossing_boundary() {
+        // '€' is 3 bytes (0xE2, 0x82, 0xAC) at 1023..1026
+        let mut bytes = "a".repeat(1023).into_bytes();
+        bytes.extend_from_slice("€".as_bytes());
+        bytes.extend_from_slice(b"more");
+
+        let res = format_error_preview(&bytes);
+        assert_eq!(res, format!("{}... [truncated]", "a".repeat(1023)));
+        assert!(!res.contains('\u{FFFD}'));
     }
 }
