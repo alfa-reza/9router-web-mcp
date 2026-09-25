@@ -699,6 +699,7 @@ fn test_process_http_port_conflict_fails_with_clean_error() {
 
     let output = Command::new(bin_path())
         .args(["--transport", "http", "--port", &occupied_port.to_string()])
+        .env("NINEROUTER_URL", "http://127.0.0.1:20128")
         .output()
         .expect("Failed to execute process");
 
@@ -733,6 +734,7 @@ fn test_process_http_graceful_shutdown_sigterm() {
 
     let mut child = Command::new(bin_path())
         .args(["--transport", "http", "--port", &free_port.to_string()])
+        .env("NINEROUTER_URL", "http://127.0.0.1:20128")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
