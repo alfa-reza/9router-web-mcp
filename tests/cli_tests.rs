@@ -474,3 +474,326 @@ base_url = "http://127.0.0.1:20128"
         stdout
     );
 }
+
+#[test]
+fn test_process_help_documents_transport_and_port() {
+    let output = Command::new(bin_path())
+        .arg("--help")
+        .output()
+        .expect("Failed to execute process");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--transport <stdio|http>"),
+        "Stdout should document --transport: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--port <PORT>"),
+        "Stdout should document --port: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_process_cli_behavior_matrix_rejections() {
+    // 1. --port 3000 without http (defaults to stdio) -> error
+    let output = Command::new(bin_path())
+        .args(["--port", "3000"])
+        .output()
+        .expect("Failed to execute process");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("only allowed with '--transport http'"),
+        "Stderr: {}",
+        stderr
+    );
+
+    // 2. --transport stdio --port 3000 -> error
+    let output = Command::new(bin_path())
+        .args(["--transport", "stdio", "--port", "3000"])
+        .output()
+        .expect("Failed to execute process");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("only allowed with '--transport http'"),
+        "Stderr: {}",
+        stderr
+    );
+
+    // 3. --transport invalid -> error
+    let output = Command::new(bin_path())
+        .args(["--transport", "invalid"])
+        .output()
+        .expect("Failed to execute process");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Invalid transport 'invalid'"),
+        "Stderr: {}",
+        stderr
+    );
+
+    // 4. configure --transport http -> error
+    let output = Command::new(bin_path())
+        .args(["configure", "--transport", "http"])
+        .output()
+        .expect("Failed to execute process");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with the 'configure' command"),
+        "Stderr: {}",
+        stderr
+    );
+
+    // 5. configure --port 3000 -> error
+    let output = Command::new(bin_path())
+        .args(["configure", "--port", "3000"])
+        .output()
+        .expect("Failed to execute process");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with the 'configure' command"),
+        "Stderr: {}",
+        stderr
+    );
+
+    // 6. port 0 rejected
+    let output = Command::new(bin_path())
+        .args(["--transport", "http", "--port", "0"])
+        .output()
+        .expect("Failed to execute process");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("port 0 is not allowed"),
+        "Stderr: {}",
+        stderr
+    );
+
+    // 7. port out of range rejected
+    let output = Command::new(bin_path())
+        .args(["--transport", "http", "--port", "70000"])
+        .output()
+        .expect("Failed to execute process");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("port out of range"), "Stderr: {}", stderr);
+
+    // 8. non-numeric port rejected
+    let output = Command::new(bin_path())
+        .args(["--transport", "http", "--port", "abc"])
+        .output()
+        .expect("Failed to execute process");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must be a valid integer"),
+        "Stderr: {}",
+        stderr
+    );
+
+    // 9. duplicate transport rejected
+    let output = Command::new(bin_path())
+        .args(["--transport", "http", "--transport", "stdio"])
+        .output()
+        .expect("Failed to execute process");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Option '--transport' was provided more than once"),
+        "Stderr: {}",
+        stderr
+    );
+
+    // 10. duplicate port rejected
+    let output = Command::new(bin_path())
+        .args(["--transport", "http", "--port", "3000", "--port", "4000"])
+        .output()
+        .expect("Failed to execute process");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Option '--port' was provided more than once"),
+        "Stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_process_transport_explicit_stdio_runs_normally() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("stdio_config.toml");
+    let config_content = r#"
+base_url = "http://127.0.0.1:20128"
+search_combo = "search-combo"
+fetch_combo = "fetch-combo"
+"#;
+    fs::write(&config_path, config_content).unwrap();
+
+    // 1. Launch with `--transport stdio`
+    let mut child1 = Command::new(bin_path())
+        .args([
+            "--transport",
+            "stdio",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to start child process");
+
+    {
+        let stdin = child1.stdin.as_mut().expect("Failed to open child stdin");
+        let init_req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0"}}}"#;
+        writeln!(stdin, "{}", init_req).expect("Failed to write initialize request");
+    }
+
+    let output1 = child1
+        .wait_with_output()
+        .expect("Failed to wait for server output");
+    assert!(output1.status.success());
+    let stdout1 = String::from_utf8_lossy(&output1.stdout);
+    assert!(stdout1.contains("\"id\":1") && stdout1.contains("\"serverInfo\""));
+
+    // 2. Launch with `serve --transport=stdio`
+    let mut child2 = Command::new(bin_path())
+        .args([
+            "serve",
+            "--transport=stdio",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to start child process");
+
+    {
+        let stdin = child2.stdin.as_mut().expect("Failed to open child stdin");
+        let init_req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0"}}}"#;
+        writeln!(stdin, "{}", init_req).expect("Failed to write initialize request");
+    }
+
+    let output2 = child2
+        .wait_with_output()
+        .expect("Failed to wait for server output");
+    assert!(output2.status.success());
+    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    assert!(stdout2.contains("\"id\":1") && stdout2.contains("\"serverInfo\""));
+}
+
+#[test]
+fn test_process_http_port_conflict_fails_with_clean_error() {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind ephemeral port");
+    let occupied_port = listener.local_addr().unwrap().port();
+
+    let output = Command::new(bin_path())
+        .args(["--transport", "http", "--port", &occupied_port.to_string()])
+        .output()
+        .expect("Failed to execute process");
+
+    assert!(
+        !output.status.success(),
+        "Process must fail when port is already occupied"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to bind HTTP listener on 127.0.0.1:"),
+        "Expected listener bind failure, got stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Address already in use") || stderr.contains("address already in use"),
+        "Expected address in use indication, got stderr: {}",
+        stderr
+    );
+
+    drop(listener);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_process_http_graceful_shutdown_sigterm() {
+    use std::io::{BufRead, BufReader};
+
+    // Find an ephemeral free port
+    let ephemeral_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind");
+    let free_port = ephemeral_listener.local_addr().unwrap().port();
+    drop(ephemeral_listener);
+
+    let mut child = Command::new(bin_path())
+        .args(["--transport", "http", "--port", &free_port.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn HTTP server process");
+
+    let pid = child.id();
+    let stderr_pipe = child.stderr.take().expect("Failed to capture stderr");
+    let mut reader = BufReader::new(stderr_pipe);
+
+    // Wait until startup log is observed
+    let mut started = false;
+    let mut captured_stderr = String::new();
+    let mut line = String::new();
+    while let Ok(n) = reader.read_line(&mut line) {
+        if n == 0 {
+            break;
+        }
+        captured_stderr.push_str(&line);
+        if line.contains("Starting 9router-mcp-web Streamable HTTP server") {
+            started = true;
+            break;
+        }
+        line.clear();
+    }
+    assert!(
+        started,
+        "Server should have logged startup line, got: {}",
+        captured_stderr
+    );
+
+    // Send SIGTERM to the child process
+    let kill_res = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output()
+        .expect("Failed to execute kill -TERM");
+    assert!(kill_res.status.success(), "kill command should succeed");
+
+    // Read remaining stderr
+    while let Ok(n) = reader.read_line(&mut line) {
+        if n == 0 {
+            break;
+        }
+        captured_stderr.push_str(&line);
+        line.clear();
+    }
+
+    let status = child.wait().expect("Failed to wait on child process");
+    assert!(
+        status.success(),
+        "Server should exit cleanly with status 0, was: {:?}",
+        status
+    );
+    assert!(
+        captured_stderr.contains("Received SIGTERM, initiating graceful shutdown"),
+        "Stderr missing SIGTERM log: {}",
+        captured_stderr
+    );
+    assert!(
+        captured_stderr.contains("MCP HTTP server stopped gracefully"),
+        "Stderr missing stopped gracefully log: {}",
+        captured_stderr
+    );
+}

@@ -1,6 +1,7 @@
-use ninerouter_mcp_web::cli::{self, Cli, CliCommand};
+use ninerouter_mcp_web::cli::{self, Cli, CliCommand, Transport};
 use ninerouter_mcp_web::config::{self, Config};
 use ninerouter_mcp_web::error::{AppError, Result};
+use ninerouter_mcp_web::http;
 use ninerouter_mcp_web::server::NineRouterMcpServer;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -44,45 +45,56 @@ async fn run() -> Result<()> {
                 tracing::warn!("{}", warning);
             }
 
-            tracing::info!(
-                base_url = %config.base_url,
-                search_combo = %config.search_combo,
-                fetch_combo = %config.fetch_combo,
-                api_key = %config.masked_api_key(),
-                "Starting 9router-mcp-web STDIO server"
-            );
-
-            let (stdin, stdout) = rmcp::transport::io::stdio();
             let server = NineRouterMcpServer::new(&config)?;
 
-            let running = rmcp::service::serve_server(server, (stdin, stdout))
-                .await
-                .map_err(|e| {
-                    AppError::ServerRuntime(format!("Failed to start MCP server: {}", e))
-                })?;
+            match cli.transport {
+                Transport::Stdio => {
+                    tracing::info!(
+                        base_url = %config.base_url,
+                        search_combo = %config.search_combo,
+                        fetch_combo = %config.fetch_combo,
+                        api_key = %config.masked_api_key(),
+                        "Starting 9router-mcp-web STDIO server"
+                    );
 
-            match running.waiting().await {
-                Ok(rmcp::service::QuitReason::Cancelled | rmcp::service::QuitReason::Closed) => {
-                    tracing::info!("MCP server stopped gracefully");
+                    let (stdin, stdout) = rmcp::transport::io::stdio();
+                    let running = rmcp::service::serve_server(server, (stdin, stdout))
+                        .await
+                        .map_err(|e| {
+                            AppError::ServerRuntime(format!("Failed to start MCP server: {}", e))
+                        })?;
+
+                    match running.waiting().await {
+                        Ok(
+                            rmcp::service::QuitReason::Cancelled
+                            | rmcp::service::QuitReason::Closed,
+                        ) => {
+                            tracing::info!("MCP server stopped gracefully");
+                        }
+                        Ok(rmcp::service::QuitReason::JoinError(e)) => {
+                            return Err(AppError::ServerRuntime(format!(
+                                "MCP server runtime task panicked or failed: {}",
+                                e
+                            )));
+                        }
+                        Ok(_) => {
+                            tracing::info!("MCP server stopped");
+                        }
+                        Err(e) => {
+                            return Err(AppError::ServerRuntime(format!(
+                                "MCP service task join failed: {}",
+                                e
+                            )));
+                        }
+                    }
+
+                    Ok(())
                 }
-                Ok(rmcp::service::QuitReason::JoinError(e)) => {
-                    return Err(AppError::ServerRuntime(format!(
-                        "MCP server runtime task panicked or failed: {}",
-                        e
-                    )));
-                }
-                Ok(_) => {
-                    tracing::info!("MCP server stopped");
-                }
-                Err(e) => {
-                    return Err(AppError::ServerRuntime(format!(
-                        "MCP service task join failed: {}",
-                        e
-                    )));
+                Transport::Http => {
+                    let port = cli.effective_port();
+                    http::serve_http(server, port).await
                 }
             }
-
-            Ok(())
         }
     }
 }
