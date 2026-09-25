@@ -13,6 +13,7 @@ A lightweight [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) s
 
 - `web_search` for web, news, and X search through a 9Router search combo.
 - `web_fetch` for fetching URLs as Markdown, text, or HTML through a 9Router fetch combo.
+- Automatic local 9Router discovery for default and custom-port local instances.
 - Works with local or remote 9Router deployments.
 - Accepts 9Router URLs with or without `/v1`.
 - Keeps provider selection and credentials out of MCP tool calls.
@@ -30,6 +31,23 @@ Then configure the connection to 9Router:
 9router-mcp-web configure
 ```
 
+### Local Discovery & Configuration
+
+When no explicit Base URL is configured, `9router-mcp-web` discovers local instances automatically:
+1. Validates the standard local 9Router address (`http://127.0.0.1:20128`) via `/api/health`.
+2. If unreachable, checks whether the `9router` binary is on `PATH` and safely inspects active launcher processes for an explicit custom port (`-p` / `--port`).
+3. Determines keyless vs auth-required state without performing provider requests.
+4. If no local instance is found, exits with an actionable manual configuration error.
+
+Configuration resolution precedence is strictly:
+```text
+Environment (NINEROUTER_URL / NINEROUTER_BASE_URL)
+    ↓
+Config File (~/.config/9router-mcp-web/config.toml)
+    ↓
+Local Discovery (runtime-derived)
+```
+
 The default combo names are:
 
 ```text
@@ -37,7 +55,7 @@ search-combo
 fetch-combo
 ```
 
-Both URL styles are supported:
+Both URL styles are supported for explicit configuration:
 
 ```text
 http://localhost:20128
