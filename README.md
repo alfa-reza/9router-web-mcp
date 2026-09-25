@@ -7,12 +7,13 @@
 
 A lightweight [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server written in Rust that exposes **Web Search** and **Web Fetch** through [9Router](https://github.com/decolua/9router).
 
-`9router-mcp-web` is a thin STDIO adapter. Provider credentials, routing, combos, and fallback behavior stay in 9Router.
+`9router-mcp-web` is a thin adapter supporting both STDIO and local Streamable HTTP transports. Provider credentials, routing, combos, and fallback behavior stay in 9Router.
 
 ## Features
 
 - `web_search` for web, news, and X search through a 9Router search combo.
 - `web_fetch` for fetching URLs as Markdown, text, or HTML through a 9Router fetch combo.
+- Dual transport support: STDIO (default) and local MCP Streamable HTTP.
 - Automatic local 9Router discovery for default and custom-port local instances.
 - Works with local or remote 9Router deployments.
 - Accepts 9Router URLs with or without `/v1`.
@@ -64,6 +65,51 @@ http://localhost:20128/v1
 
 Prebuilt binaries and checksums are available on the [Releases](https://github.com/alfa-reza/9router-web-mcp/releases) page.
 
+## Transports
+
+`9router-mcp-web` supports both **STDIO** (default) and **MCP Streamable HTTP**.
+
+### STDIO (default)
+
+STDIO remains the default transport:
+
+```sh
+9router-mcp-web
+```
+
+or explicitly:
+
+```sh
+9router-mcp-web --transport stdio
+```
+
+### Streamable HTTP
+
+Run with the local Streamable HTTP transport:
+
+```sh
+9router-mcp-web --transport http
+```
+
+Default local endpoint:
+
+```text
+http://127.0.0.1:20129/mcp
+```
+
+Override the listen port with `--port`:
+
+```sh
+9router-mcp-web --transport http --port 3000
+```
+
+> [!NOTE]
+> This HTTP transport:
+> - binds to loopback only (`127.0.0.1`);
+> - does not provide HTTPS/TLS;
+> - does not provide MCP-layer authentication;
+> - is intended strictly for local connections.
+
 ## Add to an MCP client
 
 ### Claude Code
@@ -80,7 +126,7 @@ codex mcp add 9router-web -- 9router-mcp-web
 
 ### JSON configuration
 
-For MCP clients that use the `mcpServers` configuration shape:
+For MCP clients using STDIO:
 
 ```json
 {
@@ -88,6 +134,18 @@ For MCP clients that use the `mcpServers` configuration shape:
     "9router-web": {
       "command": "9router-mcp-web",
       "args": []
+    }
+  }
+}
+```
+
+For MCP clients connecting over Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "9router-web-http": {
+      "url": "http://127.0.0.1:20129/mcp"
     }
   }
 }
