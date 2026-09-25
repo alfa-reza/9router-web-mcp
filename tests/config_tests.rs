@@ -363,8 +363,8 @@ fn test_timeout_zero_rejected() {
     assert!(loaded.is_err());
 }
 
-#[test]
-fn test_env_overrides_precedence() {
+#[tokio::test]
+async fn test_env_overrides_precedence() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
 
@@ -392,7 +392,9 @@ fn test_env_overrides_precedence() {
     guard.set("NINEROUTER_FETCH_COMBO", "env-fetch");
     guard.set("NINEROUTER_TIMEOUT_SECS", "50");
 
-    let resolved = Config::resolve(Some(&config_path)).expect("Resolve failed");
+    let resolved = Config::resolve(Some(&config_path))
+        .await
+        .expect("Resolve failed");
 
     assert_eq!(resolved.base_url, "http://env-host:20128");
     assert_eq!(resolved.api_key, Some("sk-env-key".to_string()));
@@ -851,8 +853,8 @@ fn test_config_debug_secret_safe_and_retains_useful_fields() {
     assert!(!pretty_utf8.contains(utf8_secret));
 }
 
-#[test]
-fn test_env_preferred_aliases_keep_precedence() {
+#[tokio::test]
+async fn test_env_preferred_aliases_keep_precedence() {
     let mut guard = EnvGuard::new(vec![
         "NINEROUTER_URL",
         "NINEROUTER_BASE_URL",
@@ -865,13 +867,13 @@ fn test_env_preferred_aliases_keep_precedence() {
     guard.set("NINEROUTER_KEY", "sk-primary-key");
     guard.set("NINEROUTER_API_KEY", "sk-secondary-key");
 
-    let cfg = Config::resolve(None).expect("Resolve should succeed");
+    let cfg = Config::resolve(None).await.expect("Resolve should succeed");
     assert_eq!(cfg.base_url, "http://primary-host:20128");
     assert_eq!(cfg.api_key.as_deref(), Some("sk-primary-key"));
 }
 
-#[test]
-fn test_env_empty_and_whitespace_preferred_aliases_fall_through() {
+#[tokio::test]
+async fn test_env_empty_and_whitespace_preferred_aliases_fall_through() {
     let mut guard = EnvGuard::new(vec![
         "NINEROUTER_URL",
         "NINEROUTER_BASE_URL",
@@ -885,7 +887,7 @@ fn test_env_empty_and_whitespace_preferred_aliases_fall_through() {
     guard.set("NINEROUTER_KEY", "");
     guard.set("NINEROUTER_API_KEY", "sk-secondary-key");
 
-    let cfg = Config::resolve(None).expect("Resolve should succeed");
+    let cfg = Config::resolve(None).await.expect("Resolve should succeed");
     assert_eq!(cfg.base_url, "http://secondary-host:20128");
     assert_eq!(cfg.api_key.as_deref(), Some("sk-secondary-key"));
 
@@ -893,13 +895,13 @@ fn test_env_empty_and_whitespace_preferred_aliases_fall_through() {
     guard.set("NINEROUTER_URL", "   \t  \n");
     guard.set("NINEROUTER_KEY", "   \t  ");
 
-    let cfg2 = Config::resolve(None).expect("Resolve should succeed");
+    let cfg2 = Config::resolve(None).await.expect("Resolve should succeed");
     assert_eq!(cfg2.base_url, "http://secondary-host:20128");
     assert_eq!(cfg2.api_key.as_deref(), Some("sk-secondary-key"));
 }
 
-#[test]
-fn test_env_empty_aliases_fall_through_to_file_and_defaults() {
+#[tokio::test]
+async fn test_env_empty_aliases_fall_through_to_file_and_defaults() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
 
@@ -925,15 +927,19 @@ fn test_env_empty_aliases_fall_through_to_file_and_defaults() {
     guard.set("NINEROUTER_KEY", "");
     guard.set("NINEROUTER_API_KEY", "  \t ");
 
-    let resolved = Config::resolve(Some(&config_path)).expect("Resolve should succeed");
+    let resolved = Config::resolve(Some(&config_path))
+        .await
+        .expect("Resolve should succeed");
     assert_eq!(resolved.base_url, "http://file-host:20128");
     assert_eq!(resolved.api_key.as_deref(), Some("sk-file-key"));
 
-    // Without file config, falls through to defaults
-    let resolved_default = Config::resolve(Some(&dir.path().join("nonexistent.toml")))
-        .expect("Resolve should succeed");
-    assert_eq!(resolved_default.base_url, DEFAULT_BASE_URL);
-    assert_eq!(resolved_default.api_key, None);
+    // Without file config and without local discovery running, falls through and returns actionable error
+    let err = Config::resolve(Some(&dir.path().join("nonexistent.toml")))
+        .await
+        .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("No 9Router URL is configured and no local 9Router instance was detected"));
 }
 
 #[test]

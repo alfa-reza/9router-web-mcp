@@ -24,7 +24,9 @@ async fn run() -> Result<()> {
             println!("{}", cli::VERSION_TEXT);
             Ok(())
         }
-        CliCommand::Configure => config::run_interactive_configure(cli.config_path.as_deref()),
+        CliCommand::Configure => {
+            config::run_interactive_configure(cli.config_path.as_deref()).await
+        }
         CliCommand::Serve => {
             // Configure tracing strictly to stderr so stdout remains reserved exclusively for MCP JSON-RPC
             tracing_subscriber::fmt()
@@ -35,8 +37,8 @@ async fn run() -> Result<()> {
                 )
                 .init();
 
-            // Resolve configuration (env overrides > file > defaults)
-            let config = Config::resolve(cli.config_path.as_deref())?;
+            // Resolve configuration (env overrides > file > local discovery)
+            let config = Config::resolve(cli.config_path.as_deref()).await?;
 
             if let Some(warning) = config.check_plain_http_warning() {
                 tracing::warn!("{}", warning);

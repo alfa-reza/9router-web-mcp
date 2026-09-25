@@ -6,6 +6,7 @@ use url::Url;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
+use crate::discovery::{discover_local_9router, DiscoveredInstance};
 use crate::error::{AppError, Result};
 
 pub const DEFAULT_BASE_URL: &str = "http://localhost:20128";
@@ -62,6 +63,266 @@ impl Default for Config {
             fetch_combo: default_fetch_combo(),
             timeout_secs: default_timeout_secs(),
         }
+    }
+}
+
+/// Representation of the configuration persisted to disk.
+///
+/// If `base_url` was discovered automatically rather than configured manually by the user,
+/// it is omitted (`None`) so that it remains runtime-derived and does not harden a temporary
+/// discovery result into authoritative manual configuration.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default = "default_search_combo")]
+    pub search_combo: String,
+    #[serde(default = "default_fetch_combo")]
+    pub fetch_combo: String,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl PersistedConfig {
+    pub fn canonical(&self) -> Result<Self> {
+        let base_url = match &self.base_url {
+            Some(u) => Some(validate_and_normalize_base_url(u)?),
+            None => None,
+        };
+
+        let search_combo = self.search_combo.trim();
+        if search_combo.is_empty() {
+            return Err(AppError::Config(
+                "search_combo cannot be empty or whitespace-only".to_string(),
+            ));
+        }
+
+        let fetch_combo = self.fetch_combo.trim();
+        if fetch_combo.is_empty() {
+            return Err(AppError::Config(
+                "fetch_combo cannot be empty or whitespace-only".to_string(),
+            ));
+        }
+
+        if self.timeout_secs == 0 {
+            return Err(AppError::Config(
+                "timeout_secs must be greater than 0".to_string(),
+            ));
+        }
+
+        let api_key = self.api_key.as_deref().and_then(|k| {
+            let trimmed = k.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+
+        Ok(Self {
+            base_url,
+            api_key,
+            search_combo: search_combo.to_string(),
+            fetch_combo: fetch_combo.to_string(),
+            timeout_secs: self.timeout_secs,
+        })
+    }
+
+    /// Save configuration securely to disk with mode 0600 on Unix.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let canonical = self.canonical()?;
+
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+
+        if !parent.exists() {
+            #[cfg(unix)]
+            {
+                let mut builder = fs::DirBuilder::new();
+                builder.recursive(true);
+                builder.mode(0o700);
+                builder.create(parent).map_err(|e| {
+                    AppError::Config(format!(
+                        "Failed to create config directory {}: {}",
+                        parent.display(),
+                        e
+                    ))
+                })?;
+            }
+            #[cfg(not(unix))]
+            {
+                fs::create_dir_all(parent).map_err(|e| {
+                    AppError::Config(format!(
+                        "Failed to create config directory {}: {}",
+                        parent.display(),
+                        e
+                    ))
+                })?;
+            }
+        }
+
+        let toml_str = toml::to_string_pretty(&canonical)
+            .map_err(|e| AppError::Config(format!("Failed to serialize config to TOML: {}", e)))?;
+
+        let mut tmp_file = tempfile::Builder::new()
+            .prefix(".config.tmp.")
+            .tempfile_in(parent)
+            .map_err(|e| {
+                AppError::Config(format!(
+                    "Failed to create temporary config file in {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
+
+        #[cfg(unix)]
+        {
+            let perms = fs::Permissions::from_mode(0o600);
+            tmp_file.as_file().set_permissions(perms).map_err(|e| {
+                AppError::Config(format!(
+                    "Failed to set private permissions on temporary config file: {}",
+                    e
+                ))
+            })?;
+        }
+
+        tmp_file.write_all(toml_str.as_bytes()).map_err(|e| {
+            AppError::Config(format!(
+                "Failed to write config data to temporary file: {}",
+                e
+            ))
+        })?;
+
+        tmp_file.as_file().sync_all().map_err(|e| {
+            AppError::Config(format!("Failed to flush temporary config file: {}", e))
+        })?;
+
+        tmp_file.persist(path).map_err(|e| {
+            AppError::Config(format!(
+                "Failed to atomically replace config file at {}: {}",
+                path.display(),
+                e.error
+            ))
+        })?;
+
+        Ok(())
+    }
+}
+
+/// Validated configuration loaded from disk.
+///
+/// Distinguishes between an explicitly set `base_url` vs an omitted (`None`) `base_url`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileConfig {
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub search_combo: Option<String>,
+    pub fetch_combo: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
+impl FileConfig {
+    pub fn load(path: &Path) -> Result<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(path).map_err(|e| {
+            AppError::Config(format!(
+                "Failed to read config file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let raw: RawConfigFile = toml::from_str(&content).map_err(|e| {
+            AppError::Config(format!(
+                "Failed to parse config file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let raw_base_url = raw
+            .base_url
+            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.base_url.clone()));
+
+        let base_url = match raw_base_url {
+            Some(u) => Some(validate_and_normalize_base_url(&u)?),
+            None => None,
+        };
+
+        let api_key = raw
+            .api_key
+            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.api_key.clone()))
+            .and_then(|k| {
+                let trimmed = k.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            });
+
+        let search_combo = raw
+            .search_combo
+            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.search_combo.clone()));
+
+        let search_combo = match search_combo {
+            Some(s) => {
+                let trimmed = s.trim().to_string();
+                if trimmed.is_empty() {
+                    return Err(AppError::Config(
+                        "search_combo cannot be empty or whitespace-only".to_string(),
+                    ));
+                }
+                Some(trimmed)
+            }
+            None => None,
+        };
+
+        let fetch_combo = raw
+            .fetch_combo
+            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.fetch_combo.clone()));
+
+        let fetch_combo = match fetch_combo {
+            Some(f) => {
+                let trimmed = f.trim().to_string();
+                if trimmed.is_empty() {
+                    return Err(AppError::Config(
+                        "fetch_combo cannot be empty or whitespace-only".to_string(),
+                    ));
+                }
+                Some(trimmed)
+            }
+            None => None,
+        };
+
+        let raw_timeout = raw
+            .timeout_secs
+            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.timeout_secs));
+
+        let timeout_secs = match raw_timeout {
+            Some(0) => {
+                return Err(AppError::Config(
+                    "timeout_secs must be greater than 0".to_string(),
+                ));
+            }
+            Some(t) => Some(t),
+            None => None,
+        };
+
+        Ok(Some(Self {
+            base_url,
+            api_key,
+            search_combo,
+            fetch_combo,
+            timeout_secs,
+        }))
     }
 }
 
@@ -207,132 +468,105 @@ impl Config {
 
     /// Load config from file if it exists, returning None if file does not exist.
     pub fn load_from_file(path: &Path) -> Result<Option<Self>> {
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        let content = fs::read_to_string(path).map_err(|e| {
-            AppError::Config(format!(
-                "Failed to read config file {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
-
-        let raw: RawConfigFile = toml::from_str(&content).map_err(|e| {
-            AppError::Config(format!(
-                "Failed to parse config file {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
-
-        let raw_base_url = raw
-            .base_url
-            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.base_url.clone()))
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-
-        let base_url = validate_and_normalize_base_url(&raw_base_url)?;
-
-        let api_key = raw
-            .api_key
-            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.api_key.clone()))
-            .and_then(|k| {
-                let trimmed = k.trim().to_string();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed)
-                }
-            });
-
-        let search_combo = raw
-            .search_combo
-            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.search_combo.clone()));
-
-        let search_combo = match search_combo {
-            Some(s) => {
-                let trimmed = s.trim().to_string();
-                if trimmed.is_empty() {
-                    return Err(AppError::Config(
-                        "search_combo cannot be empty or whitespace-only".to_string(),
-                    ));
-                }
-                trimmed
-            }
-            None => default_search_combo(),
+        let file_cfg = match FileConfig::load(path)? {
+            Some(fc) => fc,
+            None => return Ok(None),
         };
-
-        let fetch_combo = raw
-            .fetch_combo
-            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.fetch_combo.clone()));
-
-        let fetch_combo = match fetch_combo {
-            Some(f) => {
-                let trimmed = f.trim().to_string();
-                if trimmed.is_empty() {
-                    return Err(AppError::Config(
-                        "fetch_combo cannot be empty or whitespace-only".to_string(),
-                    ));
-                }
-                trimmed
-            }
-            None => default_fetch_combo(),
-        };
-
-        let timeout_secs = raw
-            .timeout_secs
-            .or_else(|| raw.ninerouter.as_ref().and_then(|t| t.timeout_secs))
-            .unwrap_or(DEFAULT_TIMEOUT_SECS);
-
-        if timeout_secs == 0 {
-            return Err(AppError::Config(
-                "timeout_secs must be greater than 0".to_string(),
-            ));
-        }
 
         Ok(Some(Self {
-            base_url,
-            api_key,
-            search_combo,
-            fetch_combo,
-            timeout_secs,
+            base_url: file_cfg
+                .base_url
+                .unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            api_key: file_cfg.api_key,
+            search_combo: file_cfg.search_combo.unwrap_or_else(default_search_combo),
+            fetch_combo: file_cfg.fetch_combo.unwrap_or_else(default_fetch_combo),
+            timeout_secs: file_cfg.timeout_secs.unwrap_or_else(default_timeout_secs),
         }))
     }
 
     /// Resolve configuration using precedence:
-    /// Environment Variables > File Configuration > Defaults
-    pub fn resolve(config_path_override: Option<&Path>) -> Result<Self> {
-        let config_path = Self::resolve_path(config_path_override)?;
-        let file_config = Self::load_from_file(&config_path)?.unwrap_or_default();
+    /// Environment Variables > File Configuration > Local Discovery
+    ///
+    /// If neither environment nor configuration file specifies a Base URL,
+    /// automatic local discovery is executed.
+    pub async fn resolve(config_path_override: Option<&Path>) -> Result<Self> {
+        Self::resolve_with_discovery(config_path_override, discover_local_9router()).await
+    }
 
-        // 1. Base URL override (preferred alias NINEROUTER_URL falls through if empty/whitespace to NINEROUTER_BASE_URL)
-        let base_url = if let Some(env_url) =
-            env_non_empty("NINEROUTER_URL").or_else(|| env_non_empty("NINEROUTER_BASE_URL"))
-        {
-            validate_and_normalize_base_url(&env_url)?
+    /// Resolves configuration with an injected discovery future for testing.
+    pub async fn resolve_with_discovery<F>(
+        config_path_override: Option<&Path>,
+        discovery_fut: F,
+    ) -> Result<Self>
+    where
+        F: std::future::Future<Output = Option<DiscoveredInstance>>,
+    {
+        let config_path = Self::resolve_path(config_path_override)?;
+        let file_config = FileConfig::load(&config_path)?;
+
+        // 1. Base URL: Env > File > Local Discovery
+        let env_base_url =
+            env_non_empty("NINEROUTER_URL").or_else(|| env_non_empty("NINEROUTER_BASE_URL"));
+        let file_base_url = file_config.as_ref().and_then(|f| f.base_url.clone());
+
+        let (base_url, discovered) = if let Some(env_url) = env_base_url {
+            (validate_and_normalize_base_url(&env_url)?, None)
+        } else if let Some(file_url) = file_base_url {
+            (file_url, None)
         } else {
-            file_config.base_url
+            let disc = discovery_fut.await;
+            match disc {
+                Some(d) => (d.base_url.clone(), Some(d)),
+                None => {
+                    return Err(AppError::Config(
+                        "No 9Router URL is configured and no local 9Router instance was detected.\nRun `9router-mcp-web configure` or set NINEROUTER_URL.".to_string(),
+                    ));
+                }
+            }
         };
 
-        // 2. API Key override (preferred alias NINEROUTER_KEY falls through if empty/whitespace to NINEROUTER_API_KEY)
-        let api_key = env_non_empty("NINEROUTER_KEY")
-            .or_else(|| env_non_empty("NINEROUTER_API_KEY"))
-            .or(file_config.api_key);
+        // 2. API Key: Env > File > Discovered State
+        let env_key =
+            env_non_empty("NINEROUTER_KEY").or_else(|| env_non_empty("NINEROUTER_API_KEY"));
+        let file_key = file_config.as_ref().and_then(|f| f.api_key.clone());
+        let explicit_key = env_key.or(file_key);
 
-        // 3. Search Combo override
-        let search_combo =
-            env_non_empty("NINEROUTER_SEARCH_COMBO").unwrap_or(file_config.search_combo);
+        let api_key = match explicit_key {
+            Some(key) => Some(key),
+            None => {
+                if let Some(disc) = &discovered {
+                    if disc.is_keyless {
+                        None
+                    } else {
+                        return Err(AppError::Config(format!(
+                            "Local 9Router was detected at {}, but Web Search/Web Fetch require an API key.\nSet NINEROUTER_KEY or run `9router-mcp-web configure`.",
+                            disc.base_url
+                        )));
+                    }
+                } else {
+                    None
+                }
+            }
+        };
 
-        // 4. Fetch Combo override
-        let fetch_combo =
-            env_non_empty("NINEROUTER_FETCH_COMBO").unwrap_or(file_config.fetch_combo);
+        // 3. Search Combo: Env > File > Default
+        let search_combo = env_non_empty("NINEROUTER_SEARCH_COMBO")
+            .or_else(|| file_config.as_ref().and_then(|f| f.search_combo.clone()))
+            .unwrap_or_else(default_search_combo);
 
-        // 5. Timeout override
+        // 4. Fetch Combo: Env > File > Default
+        let fetch_combo = env_non_empty("NINEROUTER_FETCH_COMBO")
+            .or_else(|| file_config.as_ref().and_then(|f| f.fetch_combo.clone()))
+            .unwrap_or_else(default_fetch_combo);
+
+        // 5. Timeout: Env > File > Default
         let timeout_secs = if let Ok(t) = std::env::var("NINEROUTER_TIMEOUT_SECS") {
             let trimmed = t.trim();
             if trimmed.is_empty() {
-                file_config.timeout_secs
+                file_config
+                    .as_ref()
+                    .and_then(|f| f.timeout_secs)
+                    .unwrap_or_else(default_timeout_secs)
             } else {
                 let parsed = trimmed.parse::<u64>().map_err(|_| {
                     AppError::Config(format!(
@@ -348,7 +582,10 @@ impl Config {
                 parsed
             }
         } else {
-            file_config.timeout_secs
+            file_config
+                .as_ref()
+                .and_then(|f| f.timeout_secs)
+                .unwrap_or_else(default_timeout_secs)
         };
 
         Ok(Self {
@@ -403,221 +640,250 @@ impl Config {
     }
 
     /// Save configuration securely to disk with mode 0600 on Unix.
-    ///
-    /// If the parent directory does not exist, it is created with mode 0700 on Unix.
-    /// If the parent directory already exists, its permissions are left untouched.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let canonical = self.canonical()?;
-
-        let parent = match path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => Path::new("."),
+        let persisted = PersistedConfig {
+            base_url: Some(self.base_url.clone()),
+            api_key: self.api_key.clone(),
+            search_combo: self.search_combo.clone(),
+            fetch_combo: self.fetch_combo.clone(),
+            timeout_secs: self.timeout_secs,
         };
-
-        if !parent.exists() {
-            #[cfg(unix)]
-            {
-                let mut builder = fs::DirBuilder::new();
-                builder.recursive(true);
-                builder.mode(0o700);
-                builder.create(parent).map_err(|e| {
-                    AppError::Config(format!(
-                        "Failed to create config directory {}: {}",
-                        parent.display(),
-                        e
-                    ))
-                })?;
-            }
-            #[cfg(not(unix))]
-            {
-                fs::create_dir_all(parent).map_err(|e| {
-                    AppError::Config(format!(
-                        "Failed to create config directory {}: {}",
-                        parent.display(),
-                        e
-                    ))
-                })?;
-            }
-        }
-
-        let toml_str = toml::to_string_pretty(&canonical)
-            .map_err(|e| AppError::Config(format!("Failed to serialize config to TOML: {}", e)))?;
-
-        let mut tmp_file = tempfile::Builder::new()
-            .prefix(".config.tmp.")
-            .tempfile_in(parent)
-            .map_err(|e| {
-                AppError::Config(format!(
-                    "Failed to create temporary config file in {}: {}",
-                    parent.display(),
-                    e
-                ))
-            })?;
-
-        #[cfg(unix)]
-        {
-            let perms = fs::Permissions::from_mode(0o600);
-            tmp_file.as_file().set_permissions(perms).map_err(|e| {
-                AppError::Config(format!(
-                    "Failed to set private permissions on temporary config file: {}",
-                    e
-                ))
-            })?;
-        }
-
-        tmp_file.write_all(toml_str.as_bytes()).map_err(|e| {
-            AppError::Config(format!(
-                "Failed to write config data to temporary file: {}",
-                e
-            ))
-        })?;
-
-        tmp_file.as_file().sync_all().map_err(|e| {
-            AppError::Config(format!("Failed to flush temporary config file: {}", e))
-        })?;
-
-        tmp_file.persist(path).map_err(|e| {
-            AppError::Config(format!(
-                "Failed to atomically replace config file at {}: {}",
-                path.display(),
-                e.error
-            ))
-        })?;
-
-        Ok(())
+        persisted.save(path)
     }
 
     /// Check if plaintext HTTP is used with an API key against a non-local host (R-CFG-07).
     pub fn check_plain_http_warning(&self) -> Option<String> {
-        self.api_key.as_ref()?;
-
-        if let Ok(parsed) = Url::parse(&self.base_url) {
-            if parsed.scheme() == "http" {
-                if let Some(host) = parsed.host_str() {
-                    let host_lower = host.to_lowercase();
-                    if host_lower != "localhost"
-                        && host_lower != "127.0.0.1"
-                        && host_lower != "::1"
-                        && host_lower != "[::1]"
-                    {
-                        return Some(format!(
-                            "WARNING: 9Router API key is configured over unencrypted plaintext HTTP to non-local host '{}'. Credentials may be intercepted in transit!",
-                            host
-                        ));
-                    }
-                }
-            }
-        }
-        None
+        check_plain_http_warning_for_url_and_key(&self.base_url, self.api_key.as_deref())
     }
 
     /// Return a safe, masked representation of the API key for diagnostics.
-    ///
-    /// Character-based to prevent panicking on multibyte UTF-8 boundaries.
     pub fn masked_api_key(&self) -> String {
-        match &self.api_key {
-            None => "(none)".to_string(),
-            Some(key) => {
-                let chars: Vec<char> = key.chars().collect();
-                if chars.len() <= 8 {
-                    "***".to_string()
-                } else {
-                    let prefix: String = chars[..3].iter().collect();
-                    let suffix: String = chars[chars.len() - 4..].iter().collect();
-                    format!("{}...{}", prefix, suffix)
+        mask_api_key(self.api_key.as_deref())
+    }
+}
+
+/// Check if plaintext HTTP is used with an API key against a non-local host.
+pub fn check_plain_http_warning_for_url_and_key(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Option<String> {
+    api_key?;
+
+    if let Ok(parsed) = Url::parse(base_url) {
+        if parsed.scheme() == "http" {
+            if let Some(host) = parsed.host_str() {
+                let host_lower = host.to_lowercase();
+                if host_lower != "localhost"
+                    && host_lower != "127.0.0.1"
+                    && host_lower != "::1"
+                    && host_lower != "[::1]"
+                {
+                    return Some(format!(
+                        "WARNING: 9Router API key is configured over unencrypted plaintext HTTP to non-local host '{}'. Credentials may be intercepted in transit!",
+                        host
+                    ));
                 }
+            }
+        }
+    }
+    None
+}
+
+/// Masks an API key for safe diagnostics display.
+pub fn mask_api_key(api_key: Option<&str>) -> String {
+    match api_key {
+        None => "(none)".to_string(),
+        Some(key) => {
+            let chars: Vec<char> = key.chars().collect();
+            if chars.len() <= 8 {
+                "***".to_string()
+            } else {
+                let prefix: String = chars[..3].iter().collect();
+                let suffix: String = chars[chars.len() - 4..].iter().collect();
+                format!("{}...{}", prefix, suffix)
             }
         }
     }
 }
 
-/// Run the interactive `configure` CLI flow.
-pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<()> {
-    let target_path = Config::resolve_path(config_path_override)?;
-
-    let existing = Config::load_from_file(&target_path)?.unwrap_or_default();
-
-    eprintln!("=== 9router-mcp-web Configuration ===");
-    eprintln!("Config file destination: {}", target_path.display());
-    eprintln!();
-
-    let stdin = io::stdin();
-    let mut reader = stdin.lock();
-
-    // 1. Base URL
-    eprint!(
-        "9Router URL (with or without /v1) [{}]: ",
-        existing.base_url
-    );
-    io::stderr().flush().ok();
-    let mut base_url_input = String::new();
-    reader.read_line(&mut base_url_input).ok();
-    let base_url_trimmed = base_url_input.trim();
-    let base_url = if base_url_trimmed.is_empty() {
-        existing.base_url.clone()
-    } else {
-        validate_and_normalize_base_url(base_url_trimmed)?
-    };
-
-    // 2. API Key (masked input, explicit clearing via '-' supported)
-    if existing.api_key.is_some() {
-        eprint!(
+fn prompt_api_key<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    existing_key: Option<&str>,
+    use_rpassword: bool,
+) -> Result<Option<String>> {
+    if let Some(key) = existing_key {
+        write!(
+            writer,
             "9Router API key [current: {}] (Enter to keep, '-' to clear): ",
-            existing.masked_api_key()
-        );
+            mask_api_key(Some(key))
+        )
+        .ok();
     } else {
-        eprint!("9Router API key (optional, press Enter to skip): ");
+        write!(writer, "9Router API key (optional, press Enter to skip): ").ok();
     }
-    io::stderr().flush().ok();
-    let raw_key_input = match rpassword::prompt_password("") {
-        Ok(pass) => pass.trim().to_string(),
-        Err(_) => {
-            let mut line = String::new();
-            reader.read_line(&mut line).ok();
-            line.trim().to_string()
+    writer.flush().ok();
+
+    let raw_key_input = if use_rpassword {
+        match rpassword::prompt_password("") {
+            Ok(pass) => pass.trim().to_string(),
+            Err(_) => {
+                let mut line = String::new();
+                reader.read_line(&mut line).ok();
+                line.trim().to_string()
+            }
         }
+    } else {
+        let mut line = String::new();
+        reader.read_line(&mut line).ok();
+        line.trim().to_string()
     };
 
     let api_key = if raw_key_input == "-" || raw_key_input == "none" || raw_key_input == "clear" {
         None
     } else if raw_key_input.is_empty() {
-        existing.api_key
+        existing_key.map(|k| k.to_string())
     } else {
         Some(raw_key_input)
     };
 
+    Ok(api_key)
+}
+
+/// Run the interactive `configure` CLI flow.
+pub async fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<()> {
+    run_interactive_configure_with(
+        config_path_override,
+        &mut io::stdin().lock(),
+        &mut io::stderr(),
+        discover_local_9router(),
+        true,
+    )
+    .await
+}
+
+/// Run the interactive `configure` CLI flow with injectable reader, writer, and discovery future.
+pub async fn run_interactive_configure_with<R, W, F>(
+    config_path_override: Option<&Path>,
+    reader: &mut R,
+    writer: &mut W,
+    discovery_fut: F,
+    use_rpassword: bool,
+) -> Result<()>
+where
+    R: BufRead,
+    W: Write,
+    F: std::future::Future<Output = Option<DiscoveredInstance>>,
+{
+    let target_path = Config::resolve_path(config_path_override)?;
+
+    let existing_file = FileConfig::load(&target_path)?;
+    let existing_base_url = existing_file.as_ref().and_then(|f| f.base_url.clone());
+    let existing_api_key = existing_file.as_ref().and_then(|f| f.api_key.clone());
+    let existing_search = existing_file
+        .as_ref()
+        .and_then(|f| f.search_combo.clone())
+        .unwrap_or_else(default_search_combo);
+    let existing_fetch = existing_file
+        .as_ref()
+        .and_then(|f| f.fetch_combo.clone())
+        .unwrap_or_else(default_fetch_combo);
+    let existing_timeout = existing_file
+        .as_ref()
+        .and_then(|f| f.timeout_secs)
+        .unwrap_or_else(default_timeout_secs);
+
+    writeln!(writer, "=== 9router-mcp-web Configuration ===").ok();
+    writeln!(writer, "Config file destination: {}", target_path.display()).ok();
+    writeln!(writer).ok();
+
+    // If Base URL is absent, attempt local discovery first
+    let discovery = if existing_base_url.is_none() {
+        discovery_fut.await
+    } else {
+        None
+    };
+
+    let (base_url_persisted, api_key_persisted, effective_base_url) = match discovery {
+        Some(disc) if disc.is_keyless => {
+            writeln!(writer, "Detected local 9Router at {}", disc.base_url).ok();
+            writeln!(writer, "API key is not required.").ok();
+            writeln!(writer).ok();
+            // Discovered Base URL remains runtime-derived and is not persisted.
+            // Keyless instance does not require an API key.
+            (None, None, disc.base_url)
+        }
+        Some(disc) => {
+            writeln!(writer, "Detected local 9Router at {}", disc.base_url).ok();
+            writeln!(writer).ok();
+            // Discovered Base URL remains runtime-derived, ask for API key
+            let api_key =
+                prompt_api_key(reader, writer, existing_api_key.as_deref(), use_rpassword)?;
+            (None, api_key, disc.base_url)
+        }
+        None => {
+            // Manual flow: prompt for Base URL and API key
+            let default_prompt_url = existing_base_url.as_deref().unwrap_or(DEFAULT_BASE_URL);
+
+            write!(
+                writer,
+                "9Router URL (with or without /v1) [{}]: ",
+                default_prompt_url
+            )
+            .ok();
+            writer.flush().ok();
+            let mut base_url_input = String::new();
+            reader.read_line(&mut base_url_input).ok();
+            let base_url_trimmed = base_url_input.trim();
+            let base_url = if base_url_trimmed.is_empty() {
+                default_prompt_url.to_string()
+            } else {
+                validate_and_normalize_base_url(base_url_trimmed)?
+            };
+
+            let api_key =
+                prompt_api_key(reader, writer, existing_api_key.as_deref(), use_rpassword)?;
+            (Some(base_url.clone()), api_key, base_url)
+        }
+    };
+
     // 3. Search Combo
-    eprint!("Search combo name [{}]: ", existing.search_combo);
-    io::stderr().flush().ok();
+    write!(writer, "Search combo name [{}]: ", existing_search).ok();
+    writer.flush().ok();
     let mut search_input = String::new();
     reader.read_line(&mut search_input).ok();
     let search_trimmed = search_input.trim();
     let search_combo = if search_trimmed.is_empty() {
-        existing.search_combo
+        existing_search
     } else {
         search_trimmed.to_string()
     };
 
     // 4. Fetch Combo
-    eprint!("Fetch combo name [{}]: ", existing.fetch_combo);
-    io::stderr().flush().ok();
+    write!(writer, "Fetch combo name [{}]: ", existing_fetch).ok();
+    writer.flush().ok();
     let mut fetch_input = String::new();
     reader.read_line(&mut fetch_input).ok();
     let fetch_trimmed = fetch_input.trim();
     let fetch_combo = if fetch_trimmed.is_empty() {
-        existing.fetch_combo
+        existing_fetch
     } else {
         fetch_trimmed.to_string()
     };
 
     // 5. Timeout
-    eprint!("Request timeout in seconds [{}]: ", existing.timeout_secs);
-    io::stderr().flush().ok();
+    write!(
+        writer,
+        "Request timeout in seconds [{}]: ",
+        existing_timeout
+    )
+    .ok();
+    writer.flush().ok();
     let mut timeout_input = String::new();
     reader.read_line(&mut timeout_input).ok();
     let timeout_trimmed = timeout_input.trim();
     let timeout_secs = if timeout_trimmed.is_empty() {
-        existing.timeout_secs
+        existing_timeout
     } else {
         let parsed = timeout_trimmed.parse::<u64>().map_err(|_| {
             AppError::Config(format!(
@@ -633,34 +899,36 @@ pub fn run_interactive_configure(config_path_override: Option<&Path>) -> Result<
         parsed
     };
 
-    let updated_config = Config {
-        base_url,
-        api_key,
+    let persisted = PersistedConfig {
+        base_url: base_url_persisted,
+        api_key: api_key_persisted,
         search_combo,
         fetch_combo,
         timeout_secs,
     };
 
-    if let Some(warning) = updated_config.check_plain_http_warning() {
-        eprintln!();
-        eprintln!("{}", warning);
+    if let Some(key) = &persisted.api_key {
+        if let Some(warning) =
+            check_plain_http_warning_for_url_and_key(&effective_base_url, Some(key))
+        {
+            writeln!(writer).ok();
+            writeln!(writer, "{}", warning).ok();
+        }
     }
 
-    updated_config.save(&target_path)?;
+    persisted.save(&target_path)?;
 
-    eprintln!();
-    eprintln!(
+    writeln!(writer).ok();
+    writeln!(
+        writer,
         "Configuration saved successfully to: {}",
         target_path.display()
-    );
+    )
+    .ok();
     Ok(())
 }
 
 /// Parse the optional configuration file path from command line arguments.
-///
-/// Returns `Ok(Some(PathBuf))` if `--config <PATH>`, `-c <PATH>`, or `--config=<PATH>` is present.
-/// Returns `Ok(None)` if no config flag was passed.
-/// Returns an error if the flag is provided without a non-empty path, or if arguments are malformed.
 pub fn parse_config_arg(args: &[String]) -> Result<Option<PathBuf>> {
     let cli = crate::cli::Cli::parse(args)?;
     Ok(cli.config_path)
